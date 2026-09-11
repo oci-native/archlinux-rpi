@@ -15,23 +15,18 @@ ARG BOOTC_VERSION=v1.16.10
 
 RUN sed -i '/^[[:space:]]*DownloadUser[[:space:]]/d' /etc/pacman.conf
 
-# Native (x86_64) tooling:
-#   - aarch64-linux-gnu-{gcc,binutils}: the official Arch cross toolchain,
-#     used only as a compiler/assembler/linker driver -- its own bundled
-#     glibc is deliberately not what gets linked into the binary, see below.
-#   - rustup: pacman's plain `rust` package ships only the host-target std
-#     library. rustup adds the aarch64-unknown-linux-gnu std component.
-#     Arch's own rustup package lists aarch64-linux-gnu-gcc as the intended
-#     companion for aarch64-unknown-linux-* targets, so this is the
-#     distro-sanctioned pairing, not an improvised one.
-#   - glib2, ostree, openssl, zstd (native): bootc's build tooling (xtask,
-#     used below to generate man pages) runs on the host and links these
-#     the ordinary way, same packages Containerfile.base installs.
+# Native (x86_64) tooling: aarch64-linux-gnu-{gcc,binutils} is Arch's
+# official cross toolchain, used only as a compiler/linker driver (its own
+# bundled glibc is not what gets linked in, see below). rustup adds the
+# aarch64-unknown-linux-gnu std component pacman's plain `rust` lacks --
+# Arch's own rustup package lists aarch64-linux-gnu-gcc as the companion
+# for this target. glib2/ostree/openssl/zstd (native) are for xtask below,
+# which runs on the host.
 RUN pacman -Syu --needed --noconfirm \
         aarch64-linux-gnu-binutils \
         aarch64-linux-gnu-gcc \
-        bsdtar \
         curl \
+        libarchive \
         gcc \
         git \
         glib2 \
@@ -47,22 +42,14 @@ RUN rustup toolchain install stable --profile minimal && \
     rustup default stable && \
     rustup target add aarch64-unknown-linux-gnu
 
-# ---------------------------------------------------------------------------
-# aarch64 sysroot, assembled from real ALARM packages.
-#
-# The cross toolchain's bundled glibc (aarch64-linux-gnu-glibc) tracks
-# mainline Arch, which runs ahead of ALARM's own glibc build. Linking against
-# the toolchain's glibc risks a binary that requires GLIBC_x.yy symbol
-# versions the Pi image's actual libc.so.6 doesn't carry -- it would build
-# clean here and refuse to run there. So the toolchain is used purely as a
-# compiler/linker driver, pointed at a --sysroot built from the same ostree,
-# glib2, openssl, zstd, and (transitively) glibc packages the final image
-# installs from ALARM.
-#
-# This is metadata and file extraction, not execution: pacman runs as a
-# native x86_64 process against a throwaway --root/--dbpath, -Sw only
-# downloads (no scriptlet from any of these packages ever runs), and bsdtar
-# just unpacks archive members. No aarch64 code executes during any of this.
+# aarch64 sysroot, assembled from real ALARM packages. The cross
+# toolchain's bundled glibc tracks mainline Arch, ahead of ALARM's -- linking
+# against it risks GLIBC_x.yy symbols the Pi image's libc.so.6 doesn't
+# have. So the toolchain is used purely as a compiler/linker driver against
+# a --sysroot built from ostree/glib2/openssl/zstd (and transitively
+# glibc), pulled straight from ALARM. No aarch64 code executes here: pacman
+# runs natively, -Sw only downloads (no scriptlet runs), bsdtar just
+# unpacks archive members.
 COPY alarm-sysroot.conf /etc/alarm-sysroot.conf
 RUN mkdir -p /sysroot-aarch64/var/lib/pacman /sysroot-aarch64/var/cache/pacman/pkg && \
     pacman --config /etc/alarm-sysroot.conf \
@@ -80,15 +67,25 @@ RUN mkdir -p /sysroot-aarch64/var/lib/pacman /sysroot-aarch64/var/cache/pacman/p
     done && \
     rm -rf /sysroot-aarch64/var/lib/pacman /sysroot-aarch64/var/cache/pacman
 
+# --sysroot alone isn't enough: it rewrites absolute paths *inside* linker
+# scripts (how glibc's libc.so GROUP script resolves), but doesn't put the
+# sysroot's usr/lib ahead of ld's own default search dirs for a bare
+# `-lNAME`. Without -L here, `-lm` resolved to the build host's real
+# /lib/libm.so.6 (x86_64) -- wrong-arch, "file in wrong format" at the
+# first binary's link. -L and -rpath-link fix it.
 RUN printf '%s\n' \
         '#!/bin/sh' \
-        'exec aarch64-linux-gnu-gcc --sysroot=/sysroot-aarch64 "$@"' \
+        'exec aarch64-linux-gnu-gcc --sysroot=/sysroot-aarch64 -L/sysroot-aarch64/usr/lib -Wl,-rpath-link=/sysroot-aarch64/usr/lib "$@"' \
         > /usr/local/bin/aarch64-sysroot-gcc && \
     chmod +x /usr/local/bin/aarch64-sysroot-gcc
 
-ENV PKG_CONFIG_ALLOW_CROSS=1 \
-    PKG_CONFIG_SYSROOT_DIR=/sysroot-aarch64 \
-    PKG_CONFIG_PATH=/sysroot-aarch64/usr/lib/pkgconfig \
+# Must be target-suffixed, not bare -- pkg-config falls back to the bare
+# name for every target, which would leak the aarch64 sysroot into the
+# native manpages build below. Hit this: caused that build to link against
+# aarch64 headers/libs and fail on /usr/lib/ld-linux-aarch64.so.1.
+ENV PKG_CONFIG_ALLOW_CROSS_aarch64_unknown_linux_gnu=1 \
+    PKG_CONFIG_SYSROOT_DIR_aarch64_unknown_linux_gnu=/sysroot-aarch64 \
+    PKG_CONFIG_PATH_aarch64_unknown_linux_gnu=/sysroot-aarch64/usr/lib/pkgconfig \
     CC_aarch64_unknown_linux_gnu=/usr/local/bin/aarch64-sysroot-gcc \
     CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/aarch64-sysroot-gcc
 
@@ -102,15 +99,11 @@ RUN git clone --branch "${BOOTC_VERSION}" --depth 1 \
 # switches over to the aarch64 target.
 RUN cargo run --release --package xtask -- manpages
 
-# `make install`'s own `completion` prerequisite also runs the freshly
-# built binary (`bootc completion <shell>`) to generate shell completions.
-# For this build that binary is aarch64, and running it here -- even under
-# the registered qemu-aarch64 binfmt handler -- is exactly the "execute a
-# freshly built aarch64 binary during an emulated build" the team's cross
-# build rule forbids. Shell completions aren't load-bearing for an
-# unattended appliance image, so this drops them rather than take that
-# risk: the `completion` prerequisite and its five install lines are
-# removed from a local copy of the Makefile.
+# `make install`'s `completion` prerequisite runs the freshly built (here,
+# aarch64) binary to generate shell completions -- exactly the "execute a
+# freshly built aarch64 binary during an emulated build" the cross-build
+# rule forbids. Not load-bearing for an appliance image, so drop it: strip
+# the `completion` prerequisite and its five install lines from the Makefile.
 RUN sed -i 's/^install: completion/install:/' Makefile && \
     sed -i '/target\/completion\/bootc\./d' Makefile
 

@@ -5,16 +5,17 @@ Owner: BOOTC BINARY workstream. Companion to `Containerfile.bootc` and
 `STATUS.md` first; this doc doesn't repeat the settled decisions recorded
 there.
 
-**Status as of this writing: the build actually ran to completion of the
-dependency graph and hit a real, concrete link failure, discovered via a
-background monitor a few minutes after the rest of this doc was written for
-handoff.** This is a genuine blocker, not a "ran out of time" gap — see the
-new section immediately below and the updated HANDOFF at the end. Everything
-else in this doc (version pin, sysroot assembly, toolchain choice) still
-stands; the `*-sys` crates all still linked clean. The failure is narrow and
-specific: two libraries, not the whole approach.
+**Status as of this writing: RESOLVED. The binary builds, links, and runs.**
+The link failure below was root-caused and fixed; a stripped aarch64 `bootc`
+and `system-reinstall-bootc` exist and `bootc --version` reports `bootc
+1.16.10` when executed. `Containerfile.bootc` has the fix applied. What's
+left before this is fully "shipped": a from-scratch `podman build -f
+Containerfile.bootc .` run (all verification so far was in a hand-iterated
+container, see below) and the canonical `podman run --platform linux/arm64
+<image> bootc --version` once a real base image exists (step 2/3 of the
+disk-image work).
 
-## CONFIRMED BLOCKER: final link picks up host libm.so.6, not the sysroot's
+## RESOLVED: final link was picking up host libm.so.6, not the sysroot's
 
 Full build log tail (from `system-reinstall-bootc`, the first binary cargo
 tried to link):
@@ -39,21 +40,54 @@ error: could not compile `system-reinstall-bootc` (bin "system-reinstall-bootc")
 libc — so whatever's going wrong is specific to `libm.so`/`libmvec.so.1`,
 not a wholesale failure of `--sysroot` handling.
 
-**Hypothesis, UNCONFIRMED — did not verify by opening the file**: glibc's
-`usr/lib/libm.so` is, like `usr/lib/libc.so`, a GNU ld linker script
-(`GROUP ( /lib/libm.so.6 ... )` is the standard glibc pattern) with an
-absolute path baked in. GNU ld's documented behavior is to treat a leading
-`/` in a linker-script `GROUP`/`INPUT` path as sysroot-relative when
-`--sysroot` is active — that's exactly what made `libc.so`'s equivalent
-script work when reading it by hand earlier in this build. If `libm.so`'s
-script also has a leading `/lib/...`, it should get the same rewrite. Since
-it apparently didn't, either: (a) our sysroot's `usr/lib/libm.so` is not
-actually present/not actually a script (worth literally `cat`-ing it — not
-done yet), or (b) something about how `-lm` specifically gets resolved
-(versus the implicit `-lc` pulled in by `-nodefaultlibs` handling) takes a
-different code path in this ld version that doesn't apply the sysroot
-rewrite the same way. This needs to be checked by hand, not guessed at
-further — see HANDOFF.
+**Confirmed root cause**: `usr/lib/libm.so` in the sysroot IS a proper
+linker script, structurally identical to `libc.so`:
+`GROUP ( /usr/lib/libm.so.6 AS_NEEDED ( /usr/lib/libmvec.so.1 ) )` — so the
+"libm.so isn't a script" theory was wrong. The actual problem: the
+`aarch64-sysroot-gcc` wrapper passed `--sysroot=/sysroot-aarch64` and
+nothing else. `--sysroot` makes `ld` rewrite absolute paths *found inside a
+linker script* to be sysroot-relative, but it does **not** by itself
+guarantee the sysroot's `usr/lib` is consulted ahead of `ld`'s own built-in
+default search directories when resolving a bare `-lNAME` token. This
+toolchain's `ld` apparently checks (or falls back to, once a sysroot-scoped
+lookup path doesn't pan out) a plain, unprefixed `/lib` — which on the
+x86_64 build container is a real, populated directory (Arch is usr-merged,
+and the container has *native* `glib2 ostree openssl zstd` installed for
+the manpages step) — and finds a real, wrong-architecture `libm.so.6`
+there. `-lc` didn't hit this because it's more central to how a cross `ld`
+resolves its own startup/default library, while `-lm`/`libmvec` are
+ordinary `-l` tokens with no special-cased handling.
+
+**Fix**: make the sysroot's library directory an explicit, high-priority
+search path instead of relying on `--sysroot` alone:
+
+```sh
+#!/bin/sh
+exec aarch64-linux-gnu-gcc --sysroot=/sysroot-aarch64 -L/sysroot-aarch64/usr/lib -Wl,-rpath-link=/sysroot-aarch64/usr/lib "$@"
+```
+
+`-L` directories given on the command line are searched before `ld`'s
+built-in defaults, so this puts the sysroot's `libm.so`/`libmvec.so.1` in
+front of the host's. Confirmed working: a full `cargo build --release
+--target aarch64-unknown-linux-gnu --bins` with this wrapper completed in
+**1m31s** (warm cache from the failed attempt — dependency compilation was
+already done, this run only had to relink), producing five real aarch64 ELF
+binaries (`bootc`, `system-reinstall-bootc`, `bootc-initramfs-setup`,
+`tests-integration`, `xtask`). `make install-all DESTDIR=/output` ran
+clean using the documented `target/release` symlink swap, and after
+`aarch64-linux-gnu-strip --strip-unneeded`, executing the binary — via its
+own dynamic loader against the sysroot's libs under qemu-user emulation
+(`/sysroot-aarch64/usr/lib/ld-linux-aarch64.so.1 --library-path
+/sysroot-aarch64/usr/lib /output/usr/bin/bootc --version`) — printed `bootc
+1.16.10`. This is a real, running, correctly-linked aarch64 binary, not
+just a clean compile.
+
+`Containerfile.bootc` has this fix applied. **Not yet done**: a clean
+`podman build -f Containerfile.bootc .` from scratch (everything above was
+verified in the hand-iterated `bootc-cross` container for speed), and the
+canonical `podman run --rm --platform linux/arm64 <image> bootc --version`
+against a real image, which needs the aarch64 base image (step 2) to exist
+first.
 
 **Wall clock, now a real number**: `time` on the full `cargo build --release
 --target aarch64-unknown-linux-gnu --bins` invocation (`CARGO_BUILD_JOBS=1`)
@@ -240,7 +274,7 @@ whether `CARGO_BUILD_JOBS=1` was actually necessary for the aarch64 link
 specifically** — the build hadn't reached the final link step before
 stopping.
 
-## Wall clock — PARTIAL, build not finished
+## Wall clock — DONE
 
 Measured on `oci-native-archlinux` (x86_64, 12 cores, 31 GiB RAM, per
 `STATUS.md`), iterating live inside a long-running `podman run ... sleep
@@ -254,28 +288,33 @@ end-to-end with `podman build`.
 | `rustup toolchain install stable --profile minimal` + target add | ~13s | done |
 | resolve + download 104-package ALARM aarch64 closure | ~1m30s (`-Sy` sync + `-Swu` resolve/download) | done |
 | native manpages generation (`cargo run --release --package xtask -- manpages`), full native dependency build first, retried once after adding native ostree/glib2/openssl/zstd | not timed precisely; ran for several minutes (roughly 6-8 minutes by wall-clock observation between start and completion, not captured with `time`) | done, succeeded |
-| aarch64 cross build (`cargo build --release --target aarch64-unknown-linux-gnu --bins`, `CARGO_BUILD_JOBS=1`) | **in progress when stopped**: started 06:32:01 UTC, still compiling dependency crates (last observed: `gio-sys`, `composefs-storage`) at 06:34:29 UTC — roughly 2.5 minutes in, nowhere near the final link. Left running in the background (see HANDOFF) but not watched to completion. | **NOT DONE** |
+| aarch64 cross build, first attempt, wrong wrapper (`cargo build --release --target aarch64-unknown-linux-gnu --bins`, `CARGO_BUILD_JOBS=1`) | **5m51.3s**, then failed at the first binary link (`libm.so.6` picked up from the host, see above) | done, failed |
+| aarch64 cross build, retry with fixed wrapper, same warm target dir | **1m31.6s** (only had to relink, dependency compilation was already cached) | done, succeeded |
+| `make install-all DESTDIR=/output` + strip | a few seconds | done |
 
-**No end-to-end `time` number for the full cross build exists.** Given
-`CARGO_BUILD_JOBS=1` serializes codegen and bootc's dependency tree is large
-(~150+ crates observed during the native manpages build), and given the
-native *parallel* build of essentially the same dependency graph took on the
-order of several minutes with all 12 cores, expect the serialized aarch64
-build to take meaningfully longer — this is a guess, not a measurement.
+A clean, cold `podman build -f Containerfile.bootc .` (no warm cargo cache,
+no hand-fixed-mid-flight wrapper) has not been timed yet — expect something
+close to the 5m51s number above, since that's what a first attempt with the
+now-corrected wrapper looks like from a cold cache.
 
-## Verification — NOT DONE
+## Verification
 
-`podman run --rm --platform linux/arm64 <image> bootc --version` — not run.
-No image exists yet; the cross build never reached a linked `bootc` binary
-in this session.
+`bootc --version` on the actual produced binary: confirmed, via its own
+dynamic loader against the sysroot (`/sysroot-aarch64/usr/lib/ld-linux-aarch64.so.1
+--library-path /sysroot-aarch64/usr/lib /output/usr/bin/bootc --version`
+under qemu-user emulation) → prints `bootc 1.16.10`. This proves the binary
+actually runs, not just links.
+
+`podman run --rm --platform linux/arm64 <image> bootc --version` against a
+real tagged image — not run yet, needs the aarch64 base image (step 2 of
+the disk-image work) to exist. The loader-based check above is an
+equivalent functional proof for the binary itself; this remaining step is
+about the image, not the binary.
 
 `bootc container lint --skip var-tmpfiles --skip utf8` on a trivial image —
-not run, same reason. Expectation (UNCONFIRMED) based on bootc-dev/bootc#1481
-still being open as of 2026-08-25 with no merged fix: the skips are still
-required under qemu-user emulation. This needs empirical confirmation
-against an actual v1.16.10 aarch64 binary once one exists — the issue's
-open/closed state on GitHub is not proof of behavior in this specific
-version, just strong circumstantial evidence.
+not run yet, same dependency on step 2. Expectation, still unconfirmed:
+based on bootc-dev/bootc#1481 being open as of 2026-08-25 with no merged
+fix, the skips are still required under qemu-user emulation.
 
 ## AUR alternative, evaluated and rejected — CONFIRMED
 
@@ -339,54 +378,38 @@ version, just strong circumstantial evidence.
 - AUR alternatives (`bootc`, `bootc-git-composefs`) checked and rejected
   with reasons, independent of the source-build path.
 
-**Half-done, exactly where it stopped:**
-- The live cross build ran the full dependency graph in 5m51s
-  (`CARGO_BUILD_JOBS=1`, single job) and then **failed**, at the first
-  binary it tried to link (`system-reinstall-bootc`), with the
-  `libm.so.6`/`libmvec.so.1` "wrong format" error captured above. This is a
-  real, unresolved blocker in the sysroot/`--sysroot` setup — narrow in
-  scope (glibc's math library specifically; `-lc` itself and every `*-sys`
-  crate's own build.rs resolved fine against the sysroot), but it does mean
-  **no binary has been produced yet**. The container (`bootc-cross`,
-  `podman run -d --name bootc-cross -v <scratchpad>:/sp:Z
-  docker.io/archlinux/archlinux:latest sleep infinity`) still has the failed
-  build state in `/tmp/bootc` — don't discard it before checking by hand.
-- Nothing from this build has been packaged into an actual container image.
-  `Containerfile.bootc` encodes the same approach that hit this failure, and
-  has never itself been fed to `podman build` — fix the link problem first.
-- Lint skip requirement (bootc-dev/bootc#1481) still needs empirical
-  confirmation once a working binary exists; blocked on the link failure.
+**Done:** the link failure is fixed (see above), a stripped aarch64 `bootc`
++ `system-reinstall-bootc` exist in the `bootc-cross` container's
+`/output`, and `bootc --version` runs and reports `1.16.10`.
 
-**What I'd do next, in order:**
-1. `cat /sysroot-aarch64/usr/lib/libm.so` inside `bootc-cross` (or the host
-   copy under the scratchpad) and compare it against `usr/lib/libc.so`,
-   which is confirmed to be a `GROUP ( /usr/lib/libc.so.6 ... )` linker
-   script. If `libm.so` is missing, empty, or a script with a path GNU ld's
-   sysroot rewrite doesn't apply to for some reason, that's the fix target.
-   This is a "read one file" check, not a re-investigation from scratch.
-2. If the linker script looks fine, try forcing the issue by hand: add
-   `-L/sysroot-aarch64/usr/lib` and/or `-Wl,-rpath-link=/sysroot-aarch64/usr/lib`
-   to the `aarch64-sysroot-gcc` wrapper in addition to `--sysroot=`, and
-   retry just the failing link (`cargo build --release --target
-   aarch64-unknown-linux-gnu --bin system-reinstall-bootc` inside the same
-   container, cache is warm) rather than a full rebuild.
-3. Once linking succeeds, run `make install-all DESTDIR=/output` (after the
-   `target/release` symlink swap already written into `Containerfile.bootc`)
-   and inspect `/output` against what `Containerfile.base`'s `/output` looks
-   like for x86_64, then strip with `aarch64-linux-gnu-strip`.
-4. Run the two verification commands (`bootc --version` under `--platform
-   linux/arm64`, and `bootc container lint --skip var-tmpfiles --skip utf8`
-   against a trivial test image) and record actual results.
-5. Only then attempt `podman build -f Containerfile.bootc .` as a clean,
-   from-scratch run — the hand-iterated container was for fast debugging,
-   not the artifact to ship.
+**Still open:**
+1. A clean, cold `podman build -f Containerfile.bootc .` — in progress.
+   This surfaced two more real bugs that never showed up in the hand-tested
+   sequence, precisely because hand-testing set env vars per-command rather
+   than via a persistent `ENV`:
+   - `bsdtar` isn't an Arch package name; it's provided by `libarchive`.
+   - The `PKG_CONFIG_ALLOW_CROSS`/`PKG_CONFIG_SYSROOT_DIR`/`PKG_CONFIG_PATH`
+     env vars must be suffixed `_aarch64_unknown_linux_gnu`, not bare. The
+     `pkg-config` crate checks a target-suffixed variable first and only
+     falls back to the bare name for *every* target lacking its own --
+     including the native x86_64 build the manpages step needs two `RUN`
+     steps later. With bare names, that native build silently linked
+     against the aarch64 sysroot's headers/libs and failed looking for
+     `/usr/lib/ld-linux-aarch64.so.1`. `Containerfile.bootc` now scopes all
+     three.
+2. `podman run --rm --platform linux/arm64 <image> bootc --version` against
+   a real tagged image, and `bootc container lint --skip var-tmpfiles
+   --skip utf8` — both need the aarch64 base image (step 2) to exist first.
 
 **Traps for whoever picks this up:**
-- The build does NOT currently produce a working binary — it fails at the
-  final link step (see above). Don't assume the sysroot approach is fully
-  validated just because every `*-sys` crate compiled clean; compiling
-  against headers/`.pc` files is a weaker test than the final link against
-  actual `.so` files, and the final link is where this broke.
+- `--sysroot` on its own is not sufficient for a cross linker wrapper — it
+  rewrites absolute paths *inside linker scripts*, but a bare `-lNAME` can
+  still resolve against the host's own default library directories first.
+  Always pair `--sysroot=` with an explicit `-L<sysroot>/usr/lib` (and
+  `-rpath-link` for transitive needs). This one cost real time to find
+  because it failed silently on the compile side (every `*-sys` crate's
+  build.rs, which only needs headers/`.pc` files, worked fine) and only
+  showed up at the final link.
 - `os.archlinuxarm.org` is **not** the right host for package downloads —
   it 404s/redirects unhelpfully for direct `.pkg.tar.xz`/`.db` paths. Use
   `mirror.archlinuxarm.org`, confirmed working, already the one baked into

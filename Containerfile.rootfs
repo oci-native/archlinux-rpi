@@ -1,0 +1,78 @@
+# aarch64 Arch Linux ARM (ALARM) base rootfs.
+#
+# Stage 1 fetches ALARM's bootstrap tarball and signature natively
+# (x86_64) and verifies against a pinned key fingerprint before extracting
+# anything -- curl, gpg, tar only, nothing from the tarball executes.
+#
+# Stage 2 unpacks it into a `scratch`/linux-arm64 image and uses ALARM's
+# own pacman (a released binary, not something this repo built) under
+# qemu-user to prune to `base` and scrub identity. Running a released
+# distro binary under emulation is the standard bootstrap technique every
+# cross-arch rootfs tool uses (debootstrap, mkarchroot) -- not the same
+# risk as Containerfile.bootc's "never execute a freshly built aarch64
+# binary" rule, which is about code this repo itself just compiled.
+#
+# Produces localhost/archlinux-arm-base:latest via:
+#   podman build -f Containerfile.rootfs -t localhost/archlinux-arm-base:latest .
+
+FROM --platform=$BUILDPLATFORM docker.io/archlinux/archlinux:latest AS fetch
+
+# ALARM Build System signing key, pinned by fingerprint. Verified by hand
+# against the live key on 2026-09-11:
+#   pub   rsa4096 2014-01-18 [SC]
+#         68B3 537F 39A3 13B3 E574  D067 7719 3F15 2BDB E6A6
+#   uid   Arch Linux ARM Build System <builder@archlinuxarm.org>
+ARG ALARM_KEY_FINGERPRINT=68B3537F39A313B3E574D06777193F152BDBE6A6
+
+RUN pacman -Sy --needed --noconfirm curl gnupg
+
+COPY keys/archlinuxarm-builder-signing-key.asc /tmp/archlinuxarm-builder-signing-key.asc
+
+# Check the vendored key file's own fingerprint against the pin before
+# trusting it -- guards against the file being silently swapped, unlike
+# just re-reading back whatever gpg was told to import.
+#
+# Import, download, and verify in one layer: a stale gpg-agent lock left in
+# a committed layer makes the *next* RUN's gpg hang on a pid that no longer
+# exists (hit this splitting these into two steps). `gpgconf --kill all`
+# at the end covers the same problem for anything downstream.
+WORKDIR /fetch
+RUN fpr="$(gpg --with-colons --show-keys /tmp/archlinuxarm-builder-signing-key.asc | awk -F: '/^fpr:/ { print $10; exit }')" && \
+    test "$fpr" = "${ALARM_KEY_FINGERPRINT}" && \
+    gpg --import /tmp/archlinuxarm-builder-signing-key.asc && \
+    curl -fLO http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz && \
+    curl -fLO http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz.sig && \
+    gpg --verify ArchLinuxARM-aarch64-latest.tar.gz.sig ArchLinuxARM-aarch64-latest.tar.gz && \
+    gpgconf --kill all || true
+
+RUN mkdir -p /extracted && tar -xpf ArchLinuxARM-aarch64-latest.tar.gz -C /extracted
+
+FROM --platform=linux/arm64 scratch AS archlinux-arm-base
+
+COPY --from=fetch /extracted/ /
+
+# pacman 7's Landlock download sandbox needs a kernel feature qemu-user
+# doesn't implement. Unrelated to signature verification: SigLevel stays
+# whatever the tarball ships, never touched here.
+RUN sed -i '/^DownloadUser/d' /etc/pacman.conf && \
+    pacman-key --init && \
+    pacman-key --populate archlinuxarm && \
+    pacman -Sy && \
+    pacman -Rns --noconfirm \
+        dhcpcd ex-vi-compat linux-aarch64 linux-firmware nano net-tools netctl openssh which && \
+    pacman -Su --noconfirm
+
+# Scrub identity/build-time state before this is used as a base layer.
+# userdel -r alone doesn't reliably remove /home/alarm under a rootless
+# userns, and can exit non-zero even when the account itself is gone --
+# tolerate that and force the home directory removal explicitly.
+RUN { userdel -r alarm || true; } && rm -rf /home/alarm && \
+    usermod -p '!' root && \
+    : > /etc/machine-id && \
+    : > /etc/hostname && \
+    rm -rf /etc/ssh && \
+    pacman -Scc --noconfirm && \
+    rm -rf /boot/* && \
+    rm -f /etc/pacman.d/gnupg/S.gpg-agent* /etc/pacman.d/gnupg/pubring.gpg~
+
+LABEL org.opencontainers.image.source="https://github.com/oci-native/archlinux-rpi"

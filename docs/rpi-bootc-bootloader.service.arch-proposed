@@ -1,0 +1,16 @@
+# Vendored, byte-identical copy of kfox1111/rpi-bootc-bootloader's systemd
+# drop-in unit. Upstream source:
+#   https://github.com/kfox1111/rpi-bootc-bootloader/blob/main/system/ostree-finalize-staged.service.d/rpi-bootc-bootloader.conf
+# Same upstream commit as docs/rpi-bootc-bootloader.arch-proposed
+# (82739f4c9ae6de9ce071014bff9dee16842fb978). No changes needed here -- the
+# only Arch-specific change in this whole port is the DTB_SRC line in the
+# script itself.
+#
+# Install target: /usr/lib/systemd/system/ostree-finalize-staged.service.d/rpi-bootc-bootloader.conf
+#
+# The empty `ExecStop=` clears the base unit's ExecStop before appending the
+# real one -- standard systemd drop-in override syntax, not a mistake.
+
+[Service]
+ExecStop=
+ExecStop=/usr/bin/rpi-bootc-bootloader finalize-staged

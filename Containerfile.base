@@ -1,0 +1,148 @@
+# aarch64 bootc base: kernel, dracut initramfs, ostree layout.
+#
+# Sibling of /home/bupd/Projects/archlinux/Containerfile.base, adapted per
+# docs/TEAM-BRIEF.md and STATUS.md. linux-rpi lives here (not in
+# Containerfile.rpi) since this repo's only aarch64 target is the Pi.
+# Everything specific to the Pi's firmware boot chain -- dtb relocation,
+# VideoCore blobs, the sync hook -- is Containerfile.rpi's job instead,
+# built FROM this image's tag.
+#
+# Depends on two images already built locally:
+#   localhost/bootc-aarch64-builder:v1.16.10   (Containerfile.bootc)
+#   localhost/archlinux-arm-base:latest        (Containerfile.rootfs)
+# Build with:
+#   podman build -f Containerfile.base -t localhost/archlinux-rpi-base:latest .
+
+FROM localhost/bootc-aarch64-builder:v1.16.10 AS bootc-builder
+
+FROM localhost/archlinux-arm-base:latest AS system
+
+# Keep pacman's mutable database and cache outside the image-managed /usr
+# deployment, same convention Containerfile.base (x86_64) uses, so pacman
+# stays usable inside an explicit `bootc usr-overlay`.
+RUN grep "= */var" /etc/pacman.conf | \
+        sed "/= *\/var/s/.*=// ; s/ //" | \
+        xargs -n1 sh -c \
+            'mkdir -p "/usr/lib/sysimage/$(dirname "$(printf %s "$1" | sed "s@/var/@@")")"; mv -v "$1" "/usr/lib/sysimage/$(printf %s "$1" | sed "s@/var/@@")"' '' && \
+    sed -i \
+        -e "/= *\/var/ s/^#//" \
+        -e "s@= */var@= /usr/lib/sysimage@g" \
+        -e "/DownloadUser/d" \
+        /etc/pacman.conf
+
+# linux-rpi, not linux-rpi-16k: 16K pages break ELF alignment assumptions
+# in QEMU/KVM/Wine/Box86/Chromium, and this box runs arbitrary aarch64
+# container images as a container host. See docs/kernel-choice.md.
+#
+# skopeo and bubblewrap aren't on Prasanth's explicit package list, but
+# both are real runtime deps, not extras: ostree-ext shells out to `skopeo
+# experimental-image-proxy` for every registry pull, so `bootc
+# upgrade`/`switch` needs it; bubblewrap sandboxes ostree deployment
+# postprocessing. glib2/openssl/zstd are the shared libs bootc itself
+# links against at runtime.
+RUN --mount=type=tmpfs,dst=/tmp \
+    --mount=type=cache,dst=/usr/lib/sysimage/cache/pacman \
+    pacman -Sy --needed --noconfirm \
+        base \
+        bubblewrap \
+        cpio \
+        dbus \
+        dracut \
+        e2fsprogs \
+        glib2 \
+        linux-rpi \
+        networkmanager \
+        openssh \
+        openssl \
+        ostree \
+        podman \
+        skopeo \
+        sudo \
+        systemd \
+        zstd
+
+COPY --from=bootc-builder /output /
+
+RUN chmod 4755 /usr/bin/newuidmap && \
+    chmod 4755 /usr/bin/newgidmap
+
+# linux-rpi puts the real kernel at /boot/kernel8.img and a zero-byte
+# *placeholder* at /usr/lib/modules/$kver/vmlinuz -- the exact path
+# bootc/ostree read as "the kernel." Fix it now, before Containerfile.rpi
+# relocates the rest of /boot and empties it.
+RUN kver="$(ls /usr/lib/modules)" && \
+    test -s /boot/kernel8.img && \
+    install -m644 /boot/kernel8.img "/usr/lib/modules/${kver}/vmlinuz"
+
+RUN install -d /usr/lib/dracut/dracut.conf.d && \
+    printf '%s\n' \
+        'systemdsystemconfdir=/etc/systemd/system' \
+        'systemdsystemunitdir=/usr/lib/systemd/system' \
+        > /usr/lib/dracut/dracut.conf.d/30-archlinux-bootc-module.conf && \
+    printf '%s\n' \
+        'reproducible=yes' \
+        'hostonly=no' \
+        'compress=zstd' \
+        'add_dracutmodules+=" ostree bootc "' \
+        > /usr/lib/dracut/dracut.conf.d/30-archlinux-bootc-container-build.conf && \
+    kernel_dir="$(find /usr/lib/modules -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)" && \
+    test -n "$kernel_dir" && \
+    dracut --force "${kernel_dir}/initramfs.img"
+
+RUN sed -i 's|^HOME=.*|HOME=/var/home|' /etc/default/useradd && \
+    printf 'uninitialized\n' > /etc/machine-id && \
+    systemctl mask systemd-firstboot.service && \
+    rm -rf \
+        /home \
+        /root \
+        /tmp \
+        /usr/local \
+        /srv \
+        /opt \
+        /mnt \
+        /var \
+        /usr/lib/sysimage/log \
+        /usr/lib/sysimage/cache/pacman/pkg && \
+    find /run -mindepth 1 -maxdepth 1 ! -name .containerenv -exec rm -rf -- {} + && \
+    install -d /sysroot /run /usr/lib/ostree /var && \
+    install -d -m 1777 /tmp && \
+    ln -sT sysroot/ostree /ostree && \
+    ln -sT var/roothome /root && \
+    ln -sT var/srv /srv && \
+    ln -sT var/opt /opt && \
+    ln -sT var/mnt /mnt && \
+    ln -sT var/home /home && \
+    ln -sT ../var/usrlocal /usr/local && \
+    printf '%s\n' \
+        'd /var/opt 0755 root root -' \
+        'd /var/home 0755 root root -' \
+        'd /var/srv 0755 root root -' \
+        'd /var/mnt 0755 root root -' \
+        'd /var/usrlocal 0755 root root -' \
+        'd /var/roothome 0700 root root -' \
+        'd /run/media 0755 root root -' \
+        > /usr/lib/tmpfiles.d/bootc-base-dirs.conf
+
+# ostree backend, not composefs backend -- different things. `[composefs]
+# enabled = yes` here is ostree-internal (deployment checkouts stored as
+# composefs images) and still uses /ostree/repo, /sysroot/ostree/deploy,
+# /boot/loader/entries/ostree-N.conf -- what the sync hook reads. Confirmed
+# against quay.io/almalinuxorg/almalinux-bootc-rpi:10, which ships this
+# and boots real Pi 5 hardware. What conflicts with `--bootloader none` is
+# bootc's separate `--composefs-backend` install flag, a different storage
+# backend entirely -- never pass it, and never ship a UKI (which would
+# auto-select it). See docs/TEAM-BRIEF.md and STATUS.md.
+RUN printf '%s\n' \
+        '[composefs]' \
+        'enabled = yes' \
+        '[sysroot]' \
+        'readonly = true' \
+        > /usr/lib/ostree/prepare-root.conf
+
+LABEL containers.bootc=1
+LABEL org.opencontainers.image.source="https://github.com/oci-native/archlinux-rpi"
+
+# --skip var-tmpfiles --skip utf8: bootc-dev/bootc#1481, still open.
+# ENOSYS under qemu-user emulation (host is x86_64). Re-run unskipped on
+# real Pi hardware once it exists.
+RUN bootc container lint --skip var-tmpfiles --skip utf8
