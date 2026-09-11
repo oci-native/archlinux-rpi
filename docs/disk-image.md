@@ -211,8 +211,31 @@ explicitly with the card's real sector count:
 sudo dd if=/dev/zero of=/dev/sdX bs=512 seek=$(( $(cat /sys/block/sdX/size) - 33 )) count=33 conv=fsync
 ```
 
-**Not yet done:** anything involving actual Pi hardware (nothing has
-booted a physical board yet).
+## Flashed and verified on real media
+
+The 25 GiB image wrote to the card cleanly: 26843545600 bytes, `6400+0
+records in / 6400+0 records out`, 2200 s at 12.2 MB/s, zero I/O or
+offline errors in the kernel log for the whole run. `oflag=direct` and
+the smaller image were the difference -- the 50G attempt at the same
+12.8 MB/s died two thirds through.
+
+Verified by reading the card back, not just the file
+(`verify-image.sh /dev/sdb`): all 22 checks pass, including
+`systemd-networkd disabled`, `no ALARM .network files`, the Pi 5 wifi
+firmware, and the BLS `root=UUID` still matching the filesystem UUID
+(`267ac166-...`) after the shrink. Full read-only fsck of both
+filesystems as actually written: `e2fsck -fn` clean through all five
+passes, 58488 files; `fsck.fat -n` clean, 442 files.
+
+`sfdisk`/`gdisk` will report a PMBR size mismatch on the card, because
+the GPT backup header sits at the 25 GiB mark rather than the card's
+59.5 GiB end. That is normal for any image flashed to a larger card and
+the kernel reads the primary table regardless.
+
+**Not yet done:** nothing has booted a physical board yet. First boot is
+what actually tests the `os_prefix` firmware chain, the wifi profile and
+the networkd fix -- none of which any amount of offline verification can
+confirm.
 
 Everything below this point predates the above and is kept for the
 reasoning and evidence it contains, not as a current status report --
