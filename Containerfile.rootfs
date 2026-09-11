@@ -30,7 +30,13 @@ FROM --platform=linux/amd64 docker.io/archlinux/archlinux:latest AS fetch
 #   uid   Arch Linux ARM Build System <builder@archlinuxarm.org>
 ARG ALARM_KEY_FINGERPRINT=68B3537F39A313B3E574D06777193F152BDBE6A6
 
-RUN pacman -Sy --needed --noconfirm curl gnupg
+# DownloadUser's Landlock/seccomp sandbox fails under qemu-user (it's
+# fine natively, e.g. on an amd64 host building this stage directly --
+# this only bites when this stage itself runs emulated, e.g. on an arm64
+# CI runner). Same fix as stage 2 below; unrelated to signature
+# verification, which stays untouched.
+RUN sed -i '/^[[:space:]]*DownloadUser[[:space:]]/d' /etc/pacman.conf && \
+    pacman -Sy --needed --noconfirm curl gnupg
 
 COPY keys/archlinuxarm-builder-signing-key.asc /tmp/archlinuxarm-builder-signing-key.asc
 
