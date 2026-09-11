@@ -21,11 +21,19 @@ name: Build aarch64 bootc image
 # real credentials is a local-only step against secrets.env on disk,
 # never in CI. See scripts/rpi-disk-image/build-disk-image.sh.
 #
+# This job only produces the UNPROVISIONED image. It has to run here
+# rather than on a workstation because `bootc install to-disk` setns()es
+# into the host mount namespace, which is unconditionally EINVAL under
+# qemu-user emulation -- see the arch guard in build-disk-image.sh. The
+# second half (firmware seeding, secrets, bootloader sync, verification)
+# is split into provision-image.sh, which has no such constraint and is
+# meant to be run locally against this job's artifact.
+#
 # Downloading the .img.zst artifact: `zstd -d --sparse rpi-bootc.img.zst
 # -o rpi-bootc.img` alone is not enough if the disk's tail is entirely
 # zero -- confirmed by hand, the decompressed file came out short
-# (~1.8GB instead of the full 58GiB). Always follow it with
-# `truncate -s 58G rpi-bootc.img` (or the exact byte count printed by the
+# (~1.8GB instead of the full size). Always follow it with
+# `truncate -s 50G rpi-bootc.img` (or the exact byte count printed by the
 # build step) to restore the correct apparent size before flashing.
 #
 # runs-on: adjust if GitHub's current arm64 hosted-runner label differs
@@ -81,7 +89,7 @@ jobs:
 
       - name: Build unprovisioned disk image
         run: |
-          sudo ./scripts/rpi-disk-image/build-disk-image.sh rpi-bootc.img 58G localhost/archlinux-rpi:latest /nonexistent-secrets.env
+          sudo ./scripts/rpi-disk-image/build-disk-image.sh rpi-bootc.img 50G localhost/archlinux-rpi:latest /nonexistent-secrets.env
 
       # actions/upload-artifact's zip does not reliably round-trip a large
       # mostly-sparse file -- confirmed by hand: a downloaded copy came
