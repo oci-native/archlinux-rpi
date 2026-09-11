@@ -1,9 +1,62 @@
 # Disk image and provisioning
 
-Owner: `diskimage` workstream. This document was cut short by a team collapse
-(see HANDOFF at the end) partway through part 3; parts 1, 2, and most of 4 and
-5 are solid and evidence-backed. Read the HANDOFF section before acting on
-anything here.
+## Status: part 3 finished and verified end to end, real hardware still not reached
+
+`Containerfile.rootfs/base/rpi`, `scripts/rpi-disk-image/build-disk-image.sh`
+and `provision-secrets.sh` all exist and are exercised for real, not just
+designed. A GitHub Actions arm64 runner (`.github/workflows/build-image.yml`)
+built the full image chain natively and ran
+`bootc install to-disk --via-loopback` for real, producing an actual `.img`.
+Confirmed straight from that run's own log:
+
+- 2-partition layout exactly as part 2 predicted from reading bootc's
+  source: `/dev/loop0p1` 512 MiB EFI System (vfat), `/dev/loop0p2` 57.5 GiB
+  `Linux root (ARM-64)` (ext4). No bootc-image-builder needed.
+- `Bootloader: none` respected -- bootc's automatic `--generic-image` (which
+  `--via-loopback` enables on its own) does not override an explicit
+  `--bootloader none`.
+- ostree layout initialized, container image deployed (23 layers, 3.0 GB,
+  4 seconds), root trimmed (53.5 GiB of the 57.5 GiB partition reclaimed as
+  sparse holes), `Installation complete!`.
+- `seed-firmware.sh` seeded all 17/17 VideoCore blobs and wrote a default
+  `config-bootc-common.txt`.
+- `rpi-bootc-bootloader sync` ran clean against the bind-mounted `/boot`
+  (found exactly 1 BLS entry, as expected for a fresh single-deployment
+  install).
+- Final image: 3.1 GB actual disk usage, 58 GiB (62277025792 bytes)
+  apparent, still sparse.
+
+**Real bugs found and fixed getting here** (each cost a CI round-trip,
+recorded so no one re-derives them): `dosfstools` was missing from the
+image -- `bootc install to-disk` runs *from inside* the image being
+installed and shells out to `mkfs.fat`, so it has to be present there, not
+just at "build time" as I'd originally reasoned. `build-disk-image.sh` runs
+under `sudo`, so its own `podman` calls use root's image store, entirely
+separate from whichever unprivileged user built the image -- needed an
+explicit `podman save`/`podman load` transfer step, and the tmpfile for
+that transfer has to be created and owned by the unprivileged user (root's
+own `mktemp -d` scratch dir is mode 0700, unwritable by anyone else).
+
+**Known limitation, worked around, not fixed at the source:**
+`actions/upload-artifact` does not reliably round-trip a large, mostly
+sparse `.img` -- confirmed by downloading one and finding real ext4
+corruption on `e2fsck` (deleted journal, lost directory entries, extensive
+block-bitmap mismatches) despite the build's own log showing a clean
+install. Worked around two ways: `build-disk-image.sh` now verifies the
+image in place, using the same mounts, immediately after install (before
+any upload ever touches it), and the CI workflow now `zstd --sparse`
+compresses the `.img` before upload instead of handing the raw file to
+`actions/upload-artifact` directly.
+
+**Not yet done:** provisioning with real secrets (deliberately CI never
+sees `secrets.env`; that's a local-only run once local root access is
+sorted -- see docs/bootc-build.md and the session's own notes on the
+`disk` group vs. real `mount()` capability gap), and anything involving
+actual Pi hardware (nothing has booted a physical board yet).
+
+Everything below this point predates the above and is kept for the
+reasoning and evidence it contains, not as a current status report --
+the HANDOFF section in particular describes an earlier, unfinished state.
 
 ## 1. How AlmaLinux actually builds their release images
 
