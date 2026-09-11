@@ -33,8 +33,8 @@ name: Build aarch64 bootc image
 # -o rpi-bootc.img` alone is not enough if the disk's tail is entirely
 # zero -- confirmed by hand, the decompressed file came out short
 # (~1.8GB instead of the full size). Always follow it with
-# `truncate -s 50G rpi-bootc.img` (or the exact byte count printed by the
-# build step) to restore the correct apparent size before flashing.
+# `truncate -s <size>` matching the `size` input (or the exact byte count
+# printed by the build step) to restore the apparent size before flashing.
 #
 # runs-on: adjust if GitHub's current arm64 hosted-runner label differs
 # from this at the time you read it -- labels have moved before.
@@ -42,6 +42,15 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      size:
+        description: >-
+          Disk image size, passed straight to truncate. Must fit the card
+          with room to spare -- a 64GB card is ~59.5 GiB usable, and a
+          long sustained write is itself a risk (a 50G write dropped the
+          USB device off the bus at 47.5 GB once).
+        required: false
+        default: "25G"
 
 concurrency:
   group: build-image-${{ github.ref }}
@@ -89,7 +98,7 @@ jobs:
 
       - name: Build unprovisioned disk image
         run: |
-          sudo ./scripts/rpi-disk-image/build-disk-image.sh rpi-bootc.img 50G localhost/archlinux-rpi:latest /nonexistent-secrets.env
+          sudo ./scripts/rpi-disk-image/build-disk-image.sh rpi-bootc.img "${{ inputs.size || '25G' }}" localhost/archlinux-rpi:latest /nonexistent-secrets.env
 
       # actions/upload-artifact's zip does not reliably round-trip a large
       # mostly-sparse file -- confirmed by hand: a downloaded copy came
