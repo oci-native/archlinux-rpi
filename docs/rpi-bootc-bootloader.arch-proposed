@@ -17,10 +17,18 @@
 # under /usr/share/raspberrypi2-kernel<ver>/<subdir>/boot/, hence the double
 # glob below in upstream. Arch's linux-rpi package puts dtbs under /boot,
 # which bootc requires empty in the committed image, so our Containerfile
-# must relocate them at build time to a fixed, non-glob path instead:
-#   /usr/lib/raspberrypi/boot/*.dtb
-#   /usr/lib/raspberrypi/boot/overlays/*.dtbo
-# No package-name/version glob is needed because we own the layout.
+# must relocate them at build time. Target is $BOOTDIR/dtbs, i.e.
+#   /usr/lib/modules/$kver/dtbs/*.dtb
+#   /usr/lib/modules/$kver/dtbs/overlays/*.dtbo
+# not a package-level fixed path, because BOOTDIR is already computed a few
+# lines below for rpi-config.txt and is per-deployment/per-kernel-version by
+# construction: reusing it means the dtb set can never drift out of sync
+# with the kernel it was built against, on either upgrade or rollback.
+# /usr/lib/raspberrypi/boot is a different, unrelated path: that's where the
+# Containerfile stages raspberrypi-bootloader's VideoCore blobs
+# (start*.elf, fixup*.dat, bootcode.bin), a package that isn't versioned
+# with the kernel and that this script never reads (see docs/kernel-layout.md
+# and docs/disk-image.md's seed-firmware.sh). Don't reuse that path here.
 
 VERSION="v0.0.8"
 TMPMNT=/tmp/mnt
@@ -153,18 +161,19 @@ process_path() {
 	# ARCH CHANGE: upstream is
 	#   local DTB_SRC=$(readlink -f "$OSTREEPATH/usr/share/raspberrypi2-kernel"*/*/boot/ 2>/dev/null)
 	# which matches AlmaLinux's RPM-packaged dtb layout. Our Containerfile
-	# relocates linux-rpi's dtbs and overlays to a fixed path instead, so no
-	# glob is needed. See docs/port-spec.md part D.
-	local DTB_SRC=$(readlink -f "$OSTREEPATH/usr/lib/raspberrypi/boot" 2>/dev/null)
+	# relocates linux-rpi's dtbs and overlays under the same versioned
+	# modules directory BOOTDIR already points at below, so no glob is
+	# needed and the dtb set can't drift from the kernel it belongs to.
+	# See docs/port-spec.md part D and docs/kernel-layout.md decision 3.
+	local KVER=$(ls "$OSTREEPATH/usr/lib/modules/" | head -n 1)
+	local BOOTDIR="$OSTREEPATH/usr/lib/modules/$KVER"
+	local DTB_SRC=$(readlink -f "$BOOTDIR/dtbs" 2>/dev/null)
 
 	if [[ -d "$DTB_SRC" ]]; then
 		sync_dir_with_pattern "$LOADERDIR" "$DTB_SRC/*" || return 1
 		mkdir -p "$LOADERDIR/overlays"
 		sync_dir_with_pattern "$LOADERDIR/overlays" "$DTB_SRC/overlays/*" || return 1
 	fi
-
-	local KVER=$(ls "$OSTREEPATH/usr/lib/modules/" | head -n 1)
-	local BOOTDIR="$OSTREEPATH/usr/lib/modules/$KVER"
 
 	if [[ -f "$BOOTDIR/rpi-config.txt" ]]; then
 		update_file_if_changed "$LOADERDIR" "rpi-config.txt" "$BOOTDIR/rpi-config.txt" || return 1

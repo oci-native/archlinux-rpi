@@ -192,14 +192,32 @@ dtb support since its 6.6.y/6.12.y branches in 2024 — well before this 6.18.50
 so this specific failure mode shouldn't reproduce on Path A. It's still worth confirming
 on both boards rather than assuming.
 
-One safety item, unrelated to kernel choice: don't run `rpi-eeprom-update` to apply
-whatever's in the default channel without checking
-[raspberrypi/rpi-eeprom#817](https://github.com/raspberrypi/rpi-eeprom/issues/817)
-first. As of the source cited there, all three 2025 EEPROM builds in the default
-channel hard-brick rev 1.1 boards (nine green blinks, no HDMI, no SSH), and the only
-confirmed-working version is `pieeprom-2024-09-10.bin`. Check that issue's current
-status before touching EEPROM on either board, and treat any EEPROM write as something
-to confirm with Prasanth first, same as the SD card rule already in the team brief.
+One safety item, unrelated to kernel choice: don't run `rpi-eeprom-update` blind on
+either board. **Rechecked 2026-09-11** (`raspberrypi/rpi-eeprom#817`, closed
+2026-04-10, `state_reason: completed`): the picture is narrower than the earlier read
+of this issue suggested. One reporter's rev 1.1 board hit nine-green-blinks after
+updating through all three 2025 EEPROM releases, and Raspberry Pi's own engineers
+(`timg236`) called it a duplicate of #750 and told the reporter to seek a reseller
+refund rather than treating it as a firmware regression. Read #750 and the closely
+related #747 in full: both are the same pattern (nine-blinks after an EEPROM update on
+a board bought from a low-cost/grey-market reseller), and in every case Raspberry Pi
+engineering's position is that this is defective or non-genuine hardware, not a bug in
+the shipped firmware, and they explicitly refuse to support downgrading below the
+firmware a board shipped with ("not supported... might work, fail to boot or randomly
+fail later at runtime", #747). A GitHub search across the whole repo for "9 green" or
+"rev 1.1" plus "brick" turns up only these two threads, not a wider pattern. Current
+`bootloader-2712` default-channel release is `v2026.05.11-2712` (checked
+2026-09-11), newer than every version implicated in #817.
+
+Net: there is no confirmed, currently-open firmware bug that bricks genuine Pi 5 rev
+1.1 boards on EEPROM update. The earlier framing of this as an active hazard to route
+around was reading the bug report at face value without reading the maintainers'
+disposition of it. That said, keep the caution simple and cheap: capture
+`vcgencmd bootloader_version` and `rpi-eeprom-update -a` (dry run only, no `-a` apply)
+output before touching EEPROM on either board (see `docs/hardware-checklist.md`), and
+still confirm with Prasanth before any actual EEPROM write, same as the SD card rule
+already in the team brief — not because #817 is live, but because EEPROM writes are
+hard to reverse regardless of whether this specific bug applies to us.
 
 ### The actual test matrix
 
@@ -355,19 +373,20 @@ assessment are both committed positions, not hedges.
   said it wasn't ready. Nobody has said it's fixed. Treat Path B as untested by us and
   unconfirmed by ALARM until our own boards prove it one way or the other.
 - **Whether ALARM's `linux-aarch64` 7.2.4-1 actually carries the mainline D0 device-tree
-  fix is inferred, not checked.** The hardware-revision research found that vanilla
-  mainline only got D0 support around 6.19-rc1; I reasoned that a 7.2.4 build postdates
-  that by a wide margin, but I did not diff `linux-aarch64`'s actual dtb list the way
-  `kernellayout` did for `linux-rpi`. Worth a direct check before relying on Path B for
-  a D0-stepping board.
+  fix — checked 2026-09-11, confirmed yes.** Downloaded the actual package
+  (`linux-aarch64-7.2.4-1-aarch64.pkg.tar.xz` from the ALARM `core` mirror) and listed
+  `boot/dtbs/broadcom/`: it ships both `bcm2712-rpi-5-b.dtb` and `bcm2712-d-rpi-5-b.dtb`,
+  the mainline-naming D0 variant, the same one `kernel-layout.md` already noted linux-rpi
+  carries under its own naming. Path B is not blocked by a missing D0 dtb.
 - **Who specifically controls `/platforms` publishing is a guess, not a confirmed
   fact.** I named both graysky2 and Kevin Mihelich based on commit/merge volume, not
   because either was seen touching a platform page. `PlugUI`/`plugbuild-UI` looked like
   candidates for the actual publishing tooling by name alone; nobody got inside them to
   check.
-- **`rpi-eeprom#817` (the EEPROM brick bug) was read once and not re-checked for current
-  status.** The doc tells the next person to check it before touching EEPROM on either
-  board; that check itself hasn't happened.
+- **`rpi-eeprom#817` (the EEPROM brick bug) — rechecked 2026-09-11.** Closed by Raspberry
+  Pi engineering as a hardware/reseller issue, not a firmware regression; see the body
+  text above for the full reasoning. Practical upshot unchanged (still confirm with
+  Prasanth before any EEPROM write), but it's no longer an open hazard to route around.
 - **No Matrix/Discord/mailing list is stated as fact but rests on ALARM's own contact
   page listing only IRC and email.** Reasonable evidence, not exhaustive — I didn't try
   to independently find a Matrix bridge the contact page simply doesn't mention.

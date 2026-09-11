@@ -359,20 +359,22 @@ asking Prasanth at the moment of writing.
   that depends on the container image's exact contents (firmware blob path,
   authorized_keys, dracut config) is a request to whoever builds it next,
   not something I could test against a real image.
-- **Cross-workstream inconsistency, found late, not resolved**:
+- **Cross-workstream inconsistency, found late, since resolved**:
   `docs/rpi-bootc-bootloader.arch-proposed` (almaport's vendored, patched
-  hook) sets `DTB_SRC` to a fixed path, `/usr/lib/raspberrypi/boot`
+  hook) originally set `DTB_SRC` to a fixed path, `/usr/lib/raspberrypi/boot`
   (package-level, not versioned with the kernel). `docs/kernel-layout.md`
   (kernellayout's decision #3, explicitly marked as superseding earlier
-  assumptions) instead recommends `$BOOTDIR/dtbs`, i.e.
-  `/usr/lib/modules/$kver/dtbs/`, specifically to keep dtbs versioned with
-  the kernel through the ostree commit and avoid drift on upgrade. These are
-  two different paths chosen by two different agents and **only one of them
-  can be right** in the final Containerfile; whoever reconciles this needs
-  to pick one and make the Containerfile's relocation step and the hook's
-  `DTB_SRC` agree. I did not resolve this; I only noticed it while cross-
-  checking my provisioning script's assumptions about where firmware content
-  lives.
+  assumptions) instead recommended `$BOOTDIR/dtbs`, i.e.
+  `/usr/lib/modules/$kver/dtbs/`, to keep dtbs versioned with the kernel
+  through the ostree commit and avoid drift on upgrade. Resolved in favor of
+  `$BOOTDIR/dtbs`: dtbs are `linux-rpi` build output tied to one exact
+  kernel build, and the hook already computes a per-deployment,
+  per-kernel-version `BOOTDIR` for `rpi-config.txt`, so reusing it removes a
+  second path to keep in sync by hand. `/usr/lib/raspberrypi/boot` still
+  exists as a path, it's just reserved for `raspberrypi-bootloader`'s
+  VideoCore blobs (this doc's `seed-firmware.sh` target), which are
+  package-level and not read by this hook at all. `port-spec.md` D.1 and
+  `rpi-bootc-bootloader.arch-proposed` are both updated to match.
 - **512 MiB firmware/ESP partition size is unverified** against the actual
   size of two slots of `bootc/entries/ostree-N/` content. If it's too small,
   the fallback is bootc-image-builder with a custom
@@ -423,9 +425,9 @@ asking Prasanth at the moment of writing.
 
 **What I would do next, in order:**
 
-1. Resolve the DTB_SRC inconsistency between almaport's hook and
-   kernellayout's decision before anyone builds a Containerfile against
-   either of them; this will silently break dtb sync otherwise.
+1. ~~Resolve the DTB_SRC inconsistency between almaport's hook and
+   kernellayout's decision~~ — done, see the blockers section above:
+   `$BOOTDIR/dtbs` wins.
 2. Once a Containerfile exists, get real root/sudo (or hand this to someone
    who has it) and actually run `bootc install to-disk --via-loopback
    --filesystem ext4 --wipe --bootloader none` against it, to confirm the

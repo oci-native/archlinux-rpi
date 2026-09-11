@@ -138,24 +138,39 @@ config files are maintained. Raspberry Pi's defconfigs are `savedefconfig`-minim
 lines, not a full ~10k-line `.config`), meaning only settings that differ from Kconfig's
 computed default are listed at all. The PKGBUILD's final build step is `make
 olddefconfig`, which fills every unlisted option from its Kconfig default and resolves
-`select` chains:
+`select` chains, so the reasoning was:
 
 - `CONFIG_SECCOMP` defaults to `y` on arm64 unconditionally (`arch/arm64/Kconfig` selects
   `HAVE_ARCH_SECCOMP`/`HAVE_ARCH_SECCOMP_FILTER`, and `kernel/Kconfig` sets `SECCOMP`
-  `default y` when that's present). This isn't a guess: every arm64 distro kernel in
-  general use, including stock Raspberry Pi OS, ships seccomp on, which is why Docker and
-  k3s already run on Raspberry Pi OS today without anyone patching this in.
+  `default y` when that's present).
 - `CONFIG_IP_NF_NAT=m` (explicit in ALARM's diffconfig) Kconfig-`select`s `CONFIG_NF_NAT`
   and pulls in `CONFIG_NF_CONNTRACK`; `CONFIG_NF_TABLES` (needed by `CONFIG_NFT_BRIDGE_META`,
-  also in the diffconfig) similarly selects `CONFIG_NETFILTER_NETLINK`. `olddefconfig`
-  resolves these automatically at build time even though neither appears as its own line.
+  also in the diffconfig) similarly selects `CONFIG_NETFILTER_NETLINK`.
 
-No PKGBUILD contribution needed here, and nothing feeds `alarmcontrib`. The honest
-caveat: this is defconfig-plus-select-chain analysis, not a built `.config` inspected on
-a booted Pi. If it matters before hardware arrives, the fast way to settle it for real is
-`podman run --platform linux/arm64 archlinuxarm/... zcat /proc/config.gz` on an actual Pi
-once one is reachable, or extracting the built kernel's `.config` from the package build
-log. Flagging as open, not blocking.
+**Update, 2026-09-11: confirmed directly, no hardware needed.** The package doesn't ship
+a loose `.config` file, but the built `kernel8.img` carries one anyway —
+`CONFIG_IKCONFIG=y` and `CONFIG_IKCONFIG_PROC=y` are both set, meaning the real `.config`
+used for the build is embedded in the kernel image itself between `IKCFG_ST`/`IKCFG_ED`
+markers, gzip-compressed, the same mechanism `/proc/config.gz` reads from on a running
+system. Extracted it directly from the downloaded package
+(`linux-rpi-6.18.50-1-aarch64.pkg.tar.xz`, `boot/kernel8.img`) with a plain
+find-the-markers-and-gunzip script, no hardware and no `/proc` needed. Reading that
+extracted `.config`:
+
+```
+CONFIG_SECCOMP=y
+CONFIG_SECCOMP_FILTER=y
+CONFIG_NETFILTER_NETLINK=m
+CONFIG_NF_CONNTRACK=m
+CONFIG_NF_NAT=m
+CONFIG_NF_TABLES=m
+```
+
+All four settle exactly as the Kconfig-default reasoning predicted. This closes the one
+open item this section flagged: it's no longer inference, it's read off the actual shipped
+binary. `CONFIG_IKCONFIG_PROC=y` also confirms `zcat /proc/config.gz` will work once a Pi
+is booted, for anyone who wants to re-check any other option later without extracting the
+package by hand — see `docs/hardware-checklist.md`.
 
 ## 5. Kernel cmdline / `os_prefix` boot chain: nothing downstream-specific found
 
@@ -171,9 +186,8 @@ of them either. Nothing to add.
 
 Same one `kernel-layout.md` already flagged and still open: nothing here has run on real
 hardware. Every claim in this doc is package/source/forum evidence, cross-checked where
-possible, not a boot log. The container-host config caveat in §4 (Kconfig-default
-reasoning vs. an inspected built `.config`) is the one item worth a five-minute check the
-moment a Pi is reachable, ahead of anything else.
+possible, not a boot log. The one item that used to sit here — §4's container-host config
+caveat — is closed as of 2026-09-11 by extracting the real embedded `.config`; see §4.
 
 ## HANDOFF
 
@@ -200,15 +214,16 @@ closed out by choice.
   Cmdline/`os_prefix` check (§5) turned up nothing downstream-specific beyond what
   `kernel-layout.md` already decided.
 
+**Closed since the original handoff (2026-09-11):**
+
+- §4's SECCOMP and NF_NAT/NETFILTER_NETLINK conclusions rested on Kconfig `default`/
+  `select` reasoning, not an inspected built `.config`. Closed without hardware: the
+  package's `kernel8.img` has `CONFIG_IKCONFIG=y`, so the real `.config` is embedded in
+  the kernel image itself; extracted it from the downloaded package and confirmed
+  `CONFIG_SECCOMP=y`, `CONFIG_NF_NAT=m`, `CONFIG_NETFILTER_NETLINK=m` directly. See §4.
+
 **Half-done / unconfirmed, flagged as such in the doc but worth restating plainly here:**
 
-- §4's SECCOMP and NF_NAT/NETFILTER_NETLINK conclusions rest on Kconfig `default`/`select`
-  reasoning (arm64 selects `HAVE_ARCH_SECCOMP` unconditionally; `IP_NF_NAT` selects
-  `NF_NAT`; `NFT_BRIDGE_META` pulls in `NF_TABLES`→`NETFILTER_NETLINK`), not an inspected
-  built `.config`. I'm confident in the reasoning and it matches universal real-world
-  experience (Docker/k3s already run on stock Raspberry Pi OS), but nobody has actually
-  run `zcat /proc/config.gz` against ALARM's shipped binary. This is the single fastest
-  thing to check the moment a Pi is reachable — five minutes, not a research task.
 - I did not measure the exact commit distance between ALARM's pinned commit
   (`0ac97ba3443f519b61bbc96079736cd8b881ea22`) and `rpi-6.18.y`'s HEAD in commits — only
   in calendar days (built 2026-09-09, branch touched 2026-09-10). Days-not-commits is what

@@ -48,7 +48,9 @@ aarch64 database snapshots already fetched into the scratchpad (`e972-*.db`), da
 1. **The rpi-bootc-bootloader diff is one line.** `DTB_SRC`'s glob assumes AlmaLinux's RPM
    dtb path. Everything else in the script — the MNTDEV device-suffix trick, the vfat mount,
    the BLS parsing, the jq/vcmailbox calls — is distro-agnostic. Patched copy at
-   `docs/rpi-bootc-bootloader.arch-proposed`.
+   `docs/rpi-bootc-bootloader.arch-proposed`. An earlier draft of this section pointed
+   `DTB_SRC` at a fixed package-level path; that was wrong and has been corrected below to
+   `$BOOTDIR/dtbs`, matching `kernel-layout.md`'s decision 3 (see D.1).
 2. **vcmailbox is not a gap.** `raspberrypi-utils` 20260904-1 in the ALARM `alarm` repo
    builds it from `raspberrypi/utils` upstream via CMake and installs it to
    `/usr/bin/vcmailbox`. Verified against the actual PKGBUILD and upstream CMakeLists.txt.
@@ -485,27 +487,45 @@ cp arch/$KARCH/boot/dts/overlays/README "${pkgdir}/boot/overlays"
 So after `pacman -S linux-rpi`, dtbs land flattened directly at `/boot/*.dtb`, and overlays
 (`*.dtbo` plus a stray `README` text file) at `/boot/overlays/`. `/boot` must be empty in the
 committed bootc image (`STATUS.md` gap #2), so our Containerfile must relocate this content
-before the image is committed. Proposed, matching `STATUS.md`'s own path choice for
-consistency:
+before the image is committed.
+
+**Correction, 2026-09-11:** the first draft of this section proposed a fixed package-level
+target, `/usr/lib/raspberrypi/boot/`. That's wrong, and `kernel-layout.md`'s decision 3
+(carried into `TEAM-BRIEF.md`'s corrections) has it right: dtbs and overlays are build
+output of `linux-rpi`, the same package that produces the kernel, and they only mean
+anything paired with the exact kernel build they shipped with. The sync hook already
+derives a per-deployment, per-kernel-version directory for `rpi-config.txt`
+(`BOOTDIR="$OSTREEPATH/usr/lib/modules/$KVER"`); putting dtbs there instead of a
+separately-named path means there is exactly one place in a deployment's tree that holds
+"this kernel's boot-relevant files," with no second path to keep in sync by hand and no
+way for a dtb set to silently outlive the kernel it was built against. `/usr/lib/raspberrypi/boot/`
+is not being discarded as a name, it is simply the wrong content for it: that path is
+reserved for `raspberrypi-bootloader`'s VideoCore blobs (`start*.elf`, `fixup*.dat`,
+`bootcode.bin`), which come from a different package that does not rev with the kernel and
+that this script never reads at all (see kernel-layout.md and disk-image.md's
+`seed-firmware.sh`). Corrected relocation:
 
 ```
-mkdir -p /usr/lib/raspberrypi/boot/overlays
-cp /boot/*.dtb /usr/lib/raspberrypi/boot/
-cp /boot/overlays/*.dtbo /usr/lib/raspberrypi/boot/overlays/
+mkdir -p /usr/lib/modules/$kver/dtbs/overlays
+cp /boot/*.dtb /usr/lib/modules/$kver/dtbs/
+cp /boot/overlays/*.dtbo /usr/lib/modules/$kver/dtbs/overlays/
 # do not copy overlays/README — sync_dir_with_pattern in rpi-bootc-bootloader has no
 # extension filter, it would get shipped onto the vfat overlays/ dir as harmless but
 # pointless cruft otherwise
 ```
 
-And the script's `DTB_SRC` line becomes a fixed path, no glob needed since we control the
-layout (patch shown in full in `docs/rpi-bootc-bootloader.arch-proposed`):
+And the script's `DTB_SRC` line reads from that same versioned directory (patch shown in
+full in `docs/rpi-bootc-bootloader.arch-proposed`):
 
 ```bash
-local DTB_SRC=$(readlink -f "$OSTREEPATH/usr/lib/raspberrypi/boot" 2>/dev/null)
+local KVER=$(ls "$OSTREEPATH/usr/lib/modules/" | head -n 1)
+local BOOTDIR="$OSTREEPATH/usr/lib/modules/$KVER"
+local DTB_SRC=$(readlink -f "$BOOTDIR/dtbs" 2>/dev/null)
 ```
 
-This is the **entire** functional diff to the script itself. Confirmed by full-file diff
-against the vendored copy: one line changed, everything else byte-identical.
+This is the **entire** functional diff to the script itself, now that it's corrected: one
+assignment changed (plus hoisting the `KVER`/`BOOTDIR` computation that already existed
+lower in the function, since `DTB_SRC` now depends on it), everything else byte-identical.
 
 ### D.2 — the vmlinuz placeholder problem (new finding, not in `STATUS.md`)
 
@@ -794,12 +814,15 @@ resolving correctly and this is the reason.
    line different from upstream v0.0.8+1).
 2. Install `raspberrypi-utils`, `jq`, `ostree` (already on the confirmed-available list).
 3. In the Containerfile, after installing `linux-rpi`:
-   - relocate `/boot/*.dtb` → `/usr/lib/raspberrypi/boot/*.dtb`
-   - relocate `/boot/overlays/*.dtbo` → `/usr/lib/raspberrypi/boot/overlays/*.dtbo` (skip `README`)
+   - relocate `/boot/*.dtb` → `/usr/lib/modules/$kver/dtbs/*.dtb`
+   - relocate `/boot/overlays/*.dtbo` → `/usr/lib/modules/$kver/dtbs/overlays/*.dtbo`
+     (skip `README`) — corrected 2026-09-11, see D.1; this is versioned with the kernel,
+     not the fixed path this list originally said
    - **before** clearing `/boot`, overwrite the empty `/usr/lib/modules/<kver>/vmlinuz`
      placeholder with the real `/boot/kernel8.img`
-   - relocate `raspberrypi-bootloader`'s `/boot/{*.bin,*.dat,*.elf}` somewhere under `/usr`
-     (exact path TBD by Containerfile workstream) and arrange a one-time seed of the vfat
+   - relocate `raspberrypi-bootloader`'s `/boot/{*.bin,*.dat,*.elf}` to
+     `/usr/lib/raspberrypi/boot/` (this is the fixed, package-level path — correct for the
+     VideoCore blobs specifically, see D.1) and arrange a one-time seed of the vfat
      partition with them — outside `rpi-bootc-bootloader`'s scope
 4. Do not install `grub`, `shim`, `efibootmgr`, `bootupd`, `selinux-policy-targeted`, or
    `container-selinux` — none are needed, nothing in the script depends on them.
