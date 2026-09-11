@@ -1,0 +1,423 @@
+#!/bin/bash
+#
+# Vendored copy of kfox1111/rpi-bootc-bootloader for the Arch/ALARM port.
+# Upstream source: https://github.com/kfox1111/rpi-bootc-bootloader
+# Upstream commit: 82739f4c9ae6de9ce071014bff9dee16842fb978 (one commit past
+#   tag v0.0.8, docs-only; v0.0.8 itself is commit 7e44a51). No newer tag
+#   exists as of 2026-09-11 (see docs/port-spec.md, part E).
+# sha256 of the unmodified upstream file: 255c566a02a9589b970c59c9a468df613e018497dfa0f616fb104402fe3b25aa
+#
+# Diff against upstream: exactly one line, the DTB_SRC assignment inside
+# process_path(). Everything else is byte-identical. See docs/port-spec.md
+# part D for why this is the only line that needs to change, and for the
+# build-time steps (dtb relocation, kernel image placeholder fix, firmware
+# blob seeding) that make this line's assumption true on an Arch rootfs.
+#
+# ARCH CHANGE: AlmaLinux's raspberrypi2-kernel4 RPM parks dtbs and overlays
+# under /usr/share/raspberrypi2-kernel<ver>/<subdir>/boot/, hence the double
+# glob below in upstream. Arch's linux-rpi package puts dtbs under /boot,
+# which bootc requires empty in the committed image, so our Containerfile
+# must relocate them at build time to a fixed, non-glob path instead:
+#   /usr/lib/raspberrypi/boot/*.dtb
+#   /usr/lib/raspberrypi/boot/overlays/*.dtbo
+# No package-name/version glob is needed because we own the layout.
+
+VERSION="v0.0.8"
+TMPMNT=/tmp/mnt
+WATCHDOG="dtparam=watchdog=on"
+
+show_help() {
+	local exit_code="${1:-0}"
+	cat <<EOF
+Usage: rpi-bootc-bootloader <command> [options]
+
+Commands:
+  sync [--tryboot]        Synchronize bootloader configuration with bootc status
+                          --tryboot: Enable tryboot mode for safer rollback
+                                     Overrides /etc/rpi-bootc-bootloader/tryboot.conf
+  tryboot                 Set the tryboot flag for the next reboot
+  tryreboot               Set the tryboot flag for the next reboot, and then reboot
+  version                 Display version information
+  help                    Display this help message
+
+EOF
+	exit "$exit_code"
+}
+
+show_version() {
+	echo "$VERSION"
+	exit 0
+}
+
+update_file_if_changed() {
+	local TARGET_DIR="$1"
+	local TARGET_NAME="$2"
+	local SOURCE_FULL_PATH="$3"
+
+	local TARGET_FULL_PATH="${TARGET_DIR}/${TARGET_NAME}"
+	local TEMP_FILE="${TARGET_FULL_PATH}.tmp"
+
+	cmp -s "$SOURCE_FULL_PATH" "$TARGET_FULL_PATH"
+	if [ $? -ne 0 ]; then
+		cp "$SOURCE_FULL_PATH" "$TEMP_FILE" || return 1
+		mv "$TEMP_FILE" "$TARGET_FULL_PATH" || return 1
+	fi
+}
+
+sync_dir_with_pattern() {
+	local TARGET_DIR="$1"
+	local SOURCE_PATTERN="$2"
+
+	mkdir -p "$TARGET_DIR"
+
+	for SOURCE_FILE in $SOURCE_PATTERN; do
+		[[ -f "$SOURCE_FILE" ]] || continue
+		local FILENAME=$(basename "$SOURCE_FILE")
+		update_file_if_changed "$TARGET_DIR" "$FILENAME" "$(realpath "$SOURCE_FILE")"
+	done
+}
+
+load_tryboot_config() {
+	local config_file="/etc/rpi-bootc-bootloader/tryboot.conf"
+	if [ -f "$config_file" ]; then
+		# Safely read the config file line by line
+		while IFS= read -r line; do
+			# Skip comments and empty lines
+			case "$line" in
+				\#*|'') continue ;;
+			esac
+			# Check if line starts with TRYBOOT=
+			if [ "${line#TRYBOOT=}" != "$line" ]; then
+				# Extract value after TRYBOOT= and strip whitespace
+				local value="${line#TRYBOOT=}"
+				# Simple trim: remove leading/trailing whitespace
+				while [ "${value#[[:space:]]}" != "$value" ]; do
+					value="${value#[[:space:]]}"
+				done
+				while [ "${value%[[:space:]]}" != "$value" ]; do
+					value="${value%[[:space:]]}"
+				done
+				# Strict validation: only accept exactly "0" or "1"
+				if [ "$value" = "0" ] || [ "$value" = "1" ]; then
+					echo "$value"
+					return 0
+				fi
+				# Found TRYBOOT line but invalid value, stop processing
+				break
+			fi
+		done < "$config_file"
+	fi
+	# Return default value
+	echo "0"
+}
+
+conf_to_ostree() {
+	LOADERFILE="$1"
+	OPTIONS=$(grep '^options ' "$LOADERFILE" | sed 's/^options //')
+	OSTREE=$(echo "$OPTIONS" | sed 's/.*ostree=\([^ ]*\)/\1/')
+	if [ "x$OSTREE" != "x" ]; then
+		if [ -d "$OSTREE" ]; then
+			OSTREEPATH=$(readlink -f "$OSTREE")
+			echo "$OSTREEPATH"
+			return 0
+		fi
+	fi
+	return 1
+}
+
+process_path() {
+	local LOADERFILE="$1"
+	local LOADERDIR="$2"
+
+	local OPTIONS=$(grep '^options ' "$LOADERFILE" | sed 's/^options //' || echo "")
+	local KERNEL=$(grep '^linux ' "$LOADERFILE" | awk '{print $2}')
+	local INITRD=$(grep '^initrd ' "$LOADERFILE" | awk '{print $2}')
+
+	[[ -n "$KERNEL" ]] || { echo "Error: No kernel found in $LOADERFILE"; return 1; }
+	[[ -n "$INITRD" ]] || { echo "Error: No initrd found in $LOADERFILE"; return 1; }
+
+	local OSTREE=$(echo "$OPTIONS" | sed 's/.*ostree=\([^ ]*\).*/\1/')
+	local OSTREEPATH=""
+	if [[ -n "$OSTREE" && -d "$OSTREE" ]]; then
+		OSTREEPATH=$(readlink -f "$OSTREE")
+	fi
+
+	update_file_if_changed "$LOADERDIR" "vmlinuz" "$KERNEL" || return 1
+	update_file_if_changed "$LOADERDIR" "initrd" "$INITRD" || return 1
+
+	local TMP_CMDLINE="/tmp/new_cmdline.$$.txt"
+	echo "$OPTIONS" > "$TMP_CMDLINE"
+	update_file_if_changed "$LOADERDIR" "cmdline.txt" "$TMP_CMDLINE"
+	rm -f "$TMP_CMDLINE"
+
+	# ARCH CHANGE: upstream is
+	#   local DTB_SRC=$(readlink -f "$OSTREEPATH/usr/share/raspberrypi2-kernel"*/*/boot/ 2>/dev/null)
+	# which matches AlmaLinux's RPM-packaged dtb layout. Our Containerfile
+	# relocates linux-rpi's dtbs and overlays to a fixed path instead, so no
+	# glob is needed. See docs/port-spec.md part D.
+	local DTB_SRC=$(readlink -f "$OSTREEPATH/usr/lib/raspberrypi/boot" 2>/dev/null)
+
+	if [[ -d "$DTB_SRC" ]]; then
+		sync_dir_with_pattern "$LOADERDIR" "$DTB_SRC/*" || return 1
+		mkdir -p "$LOADERDIR/overlays"
+		sync_dir_with_pattern "$LOADERDIR/overlays" "$DTB_SRC/overlays/*" || return 1
+	fi
+
+	local KVER=$(ls "$OSTREEPATH/usr/lib/modules/" | head -n 1)
+	local BOOTDIR="$OSTREEPATH/usr/lib/modules/$KVER"
+
+	if [[ -f "$BOOTDIR/rpi-config.txt" ]]; then
+		update_file_if_changed "$LOADERDIR" "rpi-config.txt" "$BOOTDIR/rpi-config.txt" || return 1
+	fi
+}
+
+setup_bootloader() {
+	BOOTVER="$1"
+	OTHERVER="$2"
+	cat > "$TMPMNT/config-bootc-working.txt" <<EOF
+[all]
+$WATCHDOG
+include config-bootc-common.txt
+
+[all]
+os_prefix=bootc/entries/ostree-$OTHERVER/
+include bootc/entries/ostree-$OTHERVER/rpi-config.txt
+
+[all]
+kernel=vmlinuz
+initramfs initrd followkernel
+EOF
+	cmp "$TMPMNT/config-bootc-working.txt" "$TMPMNT/tryboot.txt" >/dev/null 2>&1 || mv "$TMPMNT/config-bootc-working.txt" "$TMPMNT/tryboot.txt"
+	cat > "$TMPMNT/config-bootc-working.txt" <<EOF
+[all]
+os_prefix=bootc/entries/ostree-$BOOTVER/
+[gpio6=1]
+include bootc/entries/ostree-$BOOTVER/rpi-config.txt
+[all]
+[gpio6=0]
+EOF
+	cmp "$TMPMNT/config-bootc-working.txt" "$TMPMNT/config-bootc-default.txt" >/dev/null 2>&1 || mv "$TMPMNT/config-bootc-working.txt" "$TMPMNT/config-bootc-default.txt"
+	cat > "$TMPMNT/config-bootc-working.txt" <<EOF
+os_prefix=bootc/entries/ostree-$OTHERVER/
+include bootc/entries/ostree-$OTHERVER/rpi-config.txt
+[all]
+EOF
+	cmp "$TMPMNT/config-bootc-working.txt" "$TMPMNT/config-bootc-fallback.txt" >/dev/null 2>&1 || mv "$TMPMNT/config-bootc-working.txt" "$TMPMNT/config-bootc-fallback.txt"
+	if [ ! -f "$TMPMNT/config.txt" ]; then
+		cat > "$TMPMNT/config.txt" <<EOF
+# Do not edit. This is an Automatically generated config file.
+# Put your own customization in your image or config-bootc-common.txt
+
+[all]
+arm_64bit=1
+$WATCHDOG
+include config-bootc-common.txt
+[all]
+
+# Default boot entry and button check code.
+include config-bootc-default.txt
+
+# Include only if config-bootc-default.txt is missing OR if the filter
+# [gpio6=0] in config-bootc-default.txt and the fallback button is pressed.
+include config-bootc-fallback.txt
+
+[all]
+kernel=vmlinuz
+initramfs initrd followkernel
+EOF
+	fi
+	if [ ! -f "$TMPMNT/config-bootc-common.txt" ]; then
+		cat > "$TMPMNT/config-bootc-common.txt" <<EOF
+# Put your own settings here.
+EOF
+	fi
+}
+
+sync_bootloader() {
+	BOOTC_STATUS="$1"
+	if [ -z "$BOOTC_STATUS" ]; then
+		BOOTC_STATUS=$(bootc status --format json)
+	fi
+	if [ -z "$MNTDEV" ]; then
+		echo "MNTDEV is not defined. Searching for /sysroot..."
+
+		RAW_DEV=$(mount | awk '$3 == "/sysroot" {print $1}')
+
+		if [ -z "$RAW_DEV" ]; then
+			echo "Error: Could not find a device mounted at /sysroot." >&2
+			exit 1
+		fi
+
+		MNTDEV=$(echo "$RAW_DEV" | sed -E 's/[0-9]+$/1/')
+	fi
+	mkdir -p "$TMPMNT"
+
+	ENTRIES=$(ls /boot/loader/entries/ostree-[12].conf | wc -l)
+
+	if [ "x$ENTRIES" != "x1" -a "x$ENTRIES" != "x2" ]; then
+		echo "Failed to find any entries" >&2
+		exit 1
+	fi
+
+	STAGING=$(echo "$BOOTC_STATUS" | jq '.status.staged != null')
+	if [ "x$STAGING" != "xtrue" -a "x$STAGING" != "xfalse" ]; then
+		echo "Unknown staging state" >&2
+		exit 1
+	fi
+
+	BOOTED=$(echo "$BOOTC_STATUS" | jq -r '.status.booted.ostree | .checksum + "." + (.deploySerial | tostring)')
+	BOOTEDDIR="/sysroot/ostree/deploy/default/deploy/$BOOTED"
+	if [ "x$BOOTED" == "x.null" -a "$STAGING" == "false" ]; then
+		DETECT=$(ls -d /sysroot/ostree/deploy/default/deploy/*/ 2>/dev/null | wc -l)
+		if [ $? -eq 0 -a "x$DETECT" == "x1" -a "x$ENTRIES" == "x1" ]; then
+			BOOTEDDIR="$(readlink -f $(ls -d /sysroot/ostree/deploy/default/deploy/*/))"
+		else
+			echo "Unknown booted state" >&2
+			exit 1
+		fi
+	fi
+	if [ ! -d "$BOOTEDDIR" ]; then
+		echo "Couldn't find the booted image dir" >&2
+		exit 1
+	fi
+
+	echo "Entries: $ENTRIES"
+
+	cleanup() {
+		EXIT_CODE=$?
+		set +x
+		if [[ -n "$BASH_XTRACEFD" ]]; then
+			eval "exec ${BASH_XTRACEFD}>&-"
+			unset BASH_XTRACEFD
+		fi
+		umount "$TMPMNT" || true
+		exit "$EXIT_CODE"
+	}
+
+	trap cleanup EXIT
+
+	mount "$MNTDEV" "$TMPMNT" || exit 1
+
+	exec {TRACE_FD}> "$TMPMNT/rpi-bootc-log.txt"
+	export BASH_XTRACEFD="$TRACE_FD"
+	set -x
+
+	mkdir -p "$TMPMNT/bootc/entries"
+	if [ "x$ENTRIES" == "x1" ]; then
+		DIR=$(conf_to_ostree "/boot/loader/entries/ostree-1.conf")
+		test $? -eq 0 || exit 1
+		rm -rf "$TMPMNT/bootc/entries/ostree-1"
+		mkdir -p "$TMPMNT/bootc/entries/ostree-1" || exit 1
+		process_path "/boot/loader/entries/ostree-1.conf" "$TMPMNT/bootc/entries/ostree-1"
+		BOOTVER=1
+		OTHERVER=1
+		NEXTBOOTVER=1
+		NEXTOTHERVER=1
+		setup_bootloader "$NEXTBOOTVER" "$NEXTOTHERVER" || exit 1
+	elif [ "x$ENTRIES" == "x2" ]; then
+		DIR1=$(conf_to_ostree "/boot/loader/entries/ostree-1.conf")
+		test $? -eq 0 || exit 1
+		DIR2=$(conf_to_ostree "/boot/loader/entries/ostree-2.conf")
+		test $? -eq 0 || exit 1
+		if [ "$BOOTEDDIR" != "$DIR1" -a "$BOOTEDDIR" != "$DIR2" ]; then
+			echo "Could not find configuration for our current OS" >&2
+			exit 1
+		fi
+		BOOTVER=1
+		OTHERVER=2
+		if [ "$BOOTEDDIR" == "$DIR2" ]; then
+			BOOTVER=2
+			OTHERVER=1
+		fi
+		NEXTBOOTVER="$BOOTVER"
+		NEXTOTHERVER="$OTHERVER"
+		if [ $TRYBOOT -eq 0  -a "$STAGING" == "true" ]; then
+			NEXTBOOTVER="$OTHERVER"
+			NEXTOTHERVER="$BOOTVER"
+		fi
+		mkdir -p "$TMPMNT/bootc/entries/ostree-$OTHERVER" || exit 1
+		process_path "/boot/loader/entries/ostree-$BOOTVER.conf" "$TMPMNT/bootc/entries/ostree-$BOOTVER"
+		process_path "/boot/loader/entries/ostree-$OTHERVER.conf" "$TMPMNT/bootc/entries/ostree-$OTHERVER"
+		setup_bootloader "$NEXTBOOTVER" "$NEXTOTHERVER" || exit 1
+	fi
+}
+
+# Main command dispatcher
+case "${1:-}" in
+	sync)
+		shift  # Remove 'sync' from arguments
+		# Parse --tryboot flag
+		TRYBOOT_ARG=""
+		while [ $# -gt 0 ]; do
+			case "$1" in
+				--tryboot)
+					TRYBOOT_ARG="1"
+					shift
+					;;
+				*)
+					echo "Error: Unknown option '$1'" >&2
+					show_help 1
+					;;
+			esac
+		done
+
+		# Determine TRYBOOT value: CLI flag > config file > default
+		if [ -n "$TRYBOOT_ARG" ]; then
+			TRYBOOT="$TRYBOOT_ARG"
+		else
+			TRYBOOT=$(load_tryboot_config)
+		fi
+
+		sync_bootloader ""
+		;;
+        finalize-staged)
+		if [ -z "$MNTDEV" ]; then
+			echo "MNTDEV is not defined. Searching for /sysroot..."
+
+			RAW_DEV=$(mount | awk '$3 == "/sysroot" {print $1}')
+
+			if [ -z "$RAW_DEV" ]; then
+				echo "Error: Could not find a device mounted at /sysroot." >&2
+				exit 1
+			fi
+
+			MNTDEV=$(echo "$RAW_DEV" | sed -E 's/[0-9]+$/1/')
+		fi
+		mkdir -p "$TMPMNT"
+		mount "$MNTDEV" "$TMPMNT" || exit 1
+		RPI_ENABLED=false
+		if [ -f "$TMPMNT/config-bootc-default.txt" ]; then
+			RPI_ENABLED=true
+		fi
+		umount "$TMPMNT"
+		BOOTC_STATUS=$(bootc status --format json)
+	        /usr/bin/ostree admin finalize-staged
+		#FIXME double check etc is available here.
+		TRYBOOT=$(load_tryboot_config)
+		if [ "$RPI_ENABLED" == "true" ]; then
+			sync_bootloader "$BOOTC_STATUS"
+		fi
+		;;
+	tryboot)
+		vcmailbox 0x00038064 4 4 1
+		;;
+	tryreboot)
+		vcmailbox 0x00038064 4 4 1 && reboot
+		;;
+	version)
+		show_version
+		;;
+	help|--help|-h)
+		show_help
+		;;
+	"")
+		echo "Error: No command specified" >&2
+		echo "" >&2
+		show_help 1
+		;;
+	*)
+		echo "Error: Unknown command '$1'" >&2
+		echo "" >&2
+		show_help 1
+		;;
+esac

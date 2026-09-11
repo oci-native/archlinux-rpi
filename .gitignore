@@ -1,0 +1,7 @@
+*.img
+*.img.*
+*.tar.gz
+*.pkg.tar.*
+.env
+/build/
+/out/
