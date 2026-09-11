@@ -86,13 +86,23 @@ printf '%%wheel ALL=(ALL:ALL) ALL\n' > "$DEPLOY_DIR/etc/sudoers.d/wheel"
 chmod 0440 "$DEPLOY_DIR/etc/sudoers.d/wheel"
 chown root:root "$DEPLOY_DIR/etc/sudoers.d/wheel"
 
-echo "==> sshd: PasswordAuthentication yes, PermitRootLogin yes (explicit, as asked)"
+# Honours RPI_SSH_PASSWORD_AUTH rather than hardcoding it, so turning
+# password auth off later is an edit to secrets.env and not to this
+# script. PermitRootLogin follows it: the root password exists so a
+# serial-console login works when ssh doesn't, and if password auth is
+# off there is no key provisioned for root to log in with anyway.
+SSH_PW_AUTH="${RPI_SSH_PASSWORD_AUTH:-yes}"
+case "$SSH_PW_AUTH" in
+	yes|no) ;;
+	*) echo "Error: RPI_SSH_PASSWORD_AUTH must be 'yes' or 'no', got '$SSH_PW_AUTH'" >&2; exit 1 ;;
+esac
+echo "==> sshd: PasswordAuthentication $SSH_PW_AUTH, PermitRootLogin $SSH_PW_AUTH"
 install -d "$DEPLOY_DIR/etc/ssh/sshd_config.d"
 printf '%s\n' \
 	'# Written by provision-secrets.sh at disk-image build time.' \
-	'# Password-only auth, explicitly requested for this board.' \
-	'PasswordAuthentication yes' \
-	'PermitRootLogin yes' \
+	'# Password auth for this board, from RPI_SSH_PASSWORD_AUTH.' \
+	"PasswordAuthentication $SSH_PW_AUTH" \
+	"PermitRootLogin $SSH_PW_AUTH" \
 	> "$DEPLOY_DIR/etc/ssh/sshd_config.d/10-rpi-password-auth.conf"
 
 echo "==> NetworkManager: wifi profile for SSID $RPI_WIFI_SSID"

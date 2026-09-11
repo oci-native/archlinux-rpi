@@ -127,6 +127,30 @@ RUN sed -i 's|^HOME=.*|HOME=/var/home|' /etc/default/useradd && \
         'd /run/media 0755 root root -' \
         > /usr/lib/tmpfiles.d/bootc-base-dirs.conf
 
+# One network stack, not two. ALARM's base enables systemd-networkd and
+# ships /etc/systemd/network/{en,eth}.network, both `DHCP=yes` matching
+# `en*`/`eth*` -- and the Pi 5's onboard NIC is `end0`, so it matches.
+# Left alone, networkd and NetworkManager would both run a DHCP client on
+# the same interface. Worse, both wait-online units end up enabled, so
+# network-online.target blocks on systemd-networkd-wait-online for its
+# full timeout on any boot with no ethernet plugged in -- which is the
+# normal case for this board, since it's provisioned for wifi.
+#
+# NetworkManager is the stack here (provision-secrets.sh writes an
+# .nmconnection), so disable and mask networkd and drop ALARM's profiles.
+# systemd-resolved stays: NetworkManager integrates with it deliberately.
+RUN rm -f /etc/systemd/network/en.network /etc/systemd/network/eth.network && \
+    systemctl --no-reload disable \
+        systemd-networkd.service \
+        systemd-networkd.socket \
+        systemd-networkd-wait-online.service && \
+    systemctl --no-reload mask \
+        systemd-networkd.service \
+        systemd-networkd.socket \
+        systemd-networkd-wait-online.service && \
+    test ! -e /etc/systemd/system/multi-user.target.wants/systemd-networkd.service && \
+    test ! -e /etc/systemd/system/network-online.target.wants/systemd-networkd-wait-online.service
+
 # ostree backend, not composefs backend -- different things. `[composefs]
 # enabled = yes` here is ostree-internal (deployment checkouts stored as
 # composefs images) and still uses /ostree/repo, /sysroot/ostree/deploy,
