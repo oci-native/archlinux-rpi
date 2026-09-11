@@ -78,6 +78,7 @@ COPY empty-file /etc/hostname
 
 RUN { userdel -r alarm || true; } && rm -rf /home/alarm && \
     usermod -p '!' root && \
+    { userdel dhcpcd || true; } && { groupdel dhcpcd || true; } && \
     : > /etc/machine-id && \
     rm -rf /etc/ssh && \
     pacman -Scc --noconfirm && \

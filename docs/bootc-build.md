@@ -276,26 +276,29 @@ stopping.
 
 ## Wall clock — DONE
 
-Measured on `oci-native-archlinux` (x86_64, 12 cores, 31 GiB RAM, per
-`STATUS.md`), iterating live inside a long-running `podman run ... sleep
-infinity` container (`bootc-cross`) rather than a single `podman build` of
-`Containerfile.bootc` — the Containerfile itself has not yet been built
-end-to-end with `podman build`.
+Two measurements exist: the hand-iterated debugging sequence (in a
+long-running `bootc-cross` container, used to find and fix the three bugs
+below quickly), and the real number that matters, a clean, cold
+`podman build -f Containerfile.bootc .` on `oci-native-archlinux` (x86_64,
+12 cores, 31 GiB RAM).
 
-| step | time | status |
-| --- | --- | --- |
-| install cross toolchain + rustup + native build deps (pacman) | ~15s + ~3s (two separate installs, gcc was missing on first pass) | done |
-| `rustup toolchain install stable --profile minimal` + target add | ~13s | done |
-| resolve + download 104-package ALARM aarch64 closure | ~1m30s (`-Sy` sync + `-Swu` resolve/download) | done |
-| native manpages generation (`cargo run --release --package xtask -- manpages`), full native dependency build first, retried once after adding native ostree/glib2/openssl/zstd | not timed precisely; ran for several minutes (roughly 6-8 minutes by wall-clock observation between start and completion, not captured with `time`) | done, succeeded |
-| aarch64 cross build, first attempt, wrong wrapper (`cargo build --release --target aarch64-unknown-linux-gnu --bins`, `CARGO_BUILD_JOBS=1`) | **5m51.3s**, then failed at the first binary link (`libm.so.6` picked up from the host, see above) | done, failed |
-| aarch64 cross build, retry with fixed wrapper, same warm target dir | **1m31.6s** (only had to relink, dependency compilation was already cached) | done, succeeded |
-| `make install-all DESTDIR=/output` + strip | a few seconds | done |
+**Cold `podman build`, all three fixes applied, no warm cache: the aarch64
+cross build (`cargo build --release --target aarch64-unknown-linux-gnu
+--bins`, `CARGO_BUILD_JOBS=1`) took 7m05s.** Total build (toolchain
+install, sysroot assembly, native manpages, cross build, install, strip)
+was a few minutes more on top of that. This is the number to use for
+planning; the hand-iterated numbers below are debugging artifacts, not
+representative of a real build.
 
-A clean, cold `podman build -f Containerfile.bootc .` (no warm cargo cache,
-no hand-fixed-mid-flight wrapper) has not been timed yet — expect something
-close to the 5m51s number above, since that's what a first attempt with the
-now-corrected wrapper looks like from a cold cache.
+| step (hand-iterated debugging run) | time |
+| --- | --- |
+| install cross toolchain + rustup + native build deps | ~15s + ~3s |
+| `rustup toolchain install stable --profile minimal` + target add | ~13s |
+| resolve + download 104-package ALARM aarch64 closure | ~1m30s |
+| native manpages generation, full native dependency build first | several minutes, not timed precisely |
+| aarch64 cross build, wrong wrapper (bug #1) | 5m51.3s, then failed at first link |
+| aarch64 cross build, fixed wrapper, warm cache | 1m31.6s (relink only) |
+| `make install-all DESTDIR=/output` + strip | a few seconds |
 
 ## Verification
 
@@ -305,16 +308,19 @@ dynamic loader against the sysroot (`/sysroot-aarch64/usr/lib/ld-linux-aarch64.s
 under qemu-user emulation) → prints `bootc 1.16.10`. This proves the binary
 actually runs, not just links.
 
-`podman run --rm --platform linux/arm64 <image> bootc --version` against a
-real tagged image — not run yet, needs the aarch64 base image (step 2 of
-the disk-image work) to exist. The loader-based check above is an
-equivalent functional proof for the binary itself; this remaining step is
-about the image, not the binary.
+`podman run --rm --platform linux/arm64 <image> bootc --version` against
+`localhost/archlinux-rpi:latest` (the real, final image): `bootc 1.16.10`.
+Confirmed.
 
-`bootc container lint --skip var-tmpfiles --skip utf8` on a trivial image —
-not run yet, same dependency on step 2. Expectation, still unconfirmed:
-based on bootc-dev/bootc#1481 being open as of 2026-08-25 with no merged
-fix, the skips are still required under qemu-user emulation.
+`bootc container lint --skip var-tmpfiles --skip utf8` ran as the last
+step of both `Containerfile.base` and `Containerfile.rpi`. `Containerfile.base`
+(where `/boot` is still intentionally populated for `Containerfile.rpi` to
+relocate from) passes with one expected warning (`nonempty-boot`).
+`Containerfile.rpi`'s final image passes with **zero warnings**: 11 checks
+passed, 3 skipped (the two forced skips plus one bootupd-related check
+that doesn't apply without bootupd). The skips are still necessary:
+bootc-dev/bootc#1481 is unfixed, confirmed by the fact the build needed
+them to pass at all under this qemu-user emulation.
 
 ## AUR alternative, evaluated and rejected — CONFIRMED
 

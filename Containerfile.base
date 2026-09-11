@@ -13,9 +13,9 @@
 # Build with:
 #   podman build -f Containerfile.base -t localhost/archlinux-rpi-base:latest .
 
-FROM localhost/bootc-aarch64-builder:v1.16.10 AS bootc-builder
+FROM --platform=$BUILDPLATFORM localhost/bootc-aarch64-builder:v1.16.10 AS bootc-builder
 
-FROM localhost/archlinux-arm-base:latest AS system
+FROM --platform=linux/arm64 localhost/archlinux-arm-base:latest AS system
 
 # Keep pacman's mutable database and cache outside the image-managed /usr
 # deployment, same convention Containerfile.base (x86_64) uses, so pacman
@@ -89,6 +89,9 @@ RUN install -d /usr/lib/dracut/dracut.conf.d && \
     test -n "$kernel_dir" && \
     dracut --force "${kernel_dir}/initramfs.img"
 
+# /run/systemd/resolve/resolv.conf is a live bind mount under emulated
+# builds and can't be rm'd ("device or resource busy") -- harmless to
+# leave, /run is tmpfs at real boot regardless.
 RUN sed -i 's|^HOME=.*|HOME=/var/home|' /etc/default/useradd && \
     printf 'uninitialized\n' > /etc/machine-id && \
     systemctl mask systemd-firstboot.service && \
@@ -103,7 +106,7 @@ RUN sed -i 's|^HOME=.*|HOME=/var/home|' /etc/default/useradd && \
         /var \
         /usr/lib/sysimage/log \
         /usr/lib/sysimage/cache/pacman/pkg && \
-    find /run -mindepth 1 -maxdepth 1 ! -name .containerenv -exec rm -rf -- {} + && \
+    { find /run -mindepth 1 -maxdepth 1 ! -name .containerenv -exec rm -rf -- {} + || true; } && \
     install -d /sysroot /run /usr/lib/ostree /var && \
     install -d -m 1777 /tmp && \
     ln -sT sysroot/ostree /ostree && \
