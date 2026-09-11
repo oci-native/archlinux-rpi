@@ -28,6 +28,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: build-image-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-24.04-arm
