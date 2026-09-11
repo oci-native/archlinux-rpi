@@ -159,4 +159,40 @@ podman run --rm --privileged \
 	"$IMAGE_REF" \
 	rpi-bootc-bootloader sync
 
+echo "==> Verifying (read-only, same mounts, before any upload/download round-trip)"
+# Verification happens here, in-place, rather than after downloading the
+# .img elsewhere: a large mostly-sparse disk image does not necessarily
+# survive an upload-artifact/download-artifact round-trip intact (hit
+# this by hand -- a downloaded, truncate-restored copy came back with
+# real ext4 corruption that a fresh e2fsck found, while the CI job's own
+# build log showed a clean `Installation complete!`). Checking right here
+# means the checks run against exactly what was just written to disk.
+FAIL=0
+check() { if eval "$2"; then echo "  OK   $1"; else echo "  FAIL $1"; FAIL=1; fi; }
+
+check "config.txt exists" "[[ -f $SCRATCH/firmware/config.txt ]]"
+check "bootc/entries/ostree-1/ exists" "[[ -d $SCRATCH/firmware/bootc/entries/ostree-1 ]]"
+check "  vmlinuz present" "[[ -f $SCRATCH/firmware/bootc/entries/ostree-1/vmlinuz ]]"
+check "  initrd present" "[[ -f $SCRATCH/firmware/bootc/entries/ostree-1/initrd ]]"
+check "  cmdline.txt present" "[[ -f $SCRATCH/firmware/bootc/entries/ostree-1/cmdline.txt ]]"
+check "  dtbs present" "compgen -G '$SCRATCH/firmware/bootc/entries/ostree-1/*.dtb' >/dev/null"
+check "os_prefix points at ostree-1" "grep -q 'os_prefix=bootc/entries/ostree-1/' $SCRATCH/firmware/config-bootc-default.txt"
+check "ostree deployment exists" "compgen -G '$SCRATCH/sysroot/ostree/deploy/default/deploy/*/' >/dev/null"
+check "ostree repo exists" "[[ -d $SCRATCH/sysroot/ostree/repo ]]"
+
+if [[ "$PROVISION" -eq 1 ]]; then
+	DEPLOY_DIR="$(compgen -G "$SCRATCH/sysroot/ostree/deploy/default/deploy/*/" | head -1)"
+	check "hostname is $RPI_HOSTNAME" "[[ \"\$(cat ${DEPLOY_DIR}etc/hostname)\" == '$RPI_HOSTNAME' ]]"
+	check "NM wifi profile exists, mode 600" "[[ \"\$(stat -c%a ${DEPLOY_DIR}etc/NetworkManager/system-connections/${RPI_WIFI_SSID}.nmconnection 2>/dev/null)\" == '600' ]]"
+	check "sshd enabled" "[[ -e ${DEPLOY_DIR}etc/systemd/system/multi-user.target.wants/sshd.service ]]"
+	check "NetworkManager enabled" "[[ -e ${DEPLOY_DIR}etc/systemd/system/multi-user.target.wants/NetworkManager.service ]]"
+else
+	echo "  SKIP hostname/wifi/sshd/NM checks (unprovisioned build)"
+fi
+
+if [[ "$FAIL" -eq 1 ]]; then
+	echo "==> Verification FAILED, see FAIL lines above" >&2
+	exit 1
+fi
+
 echo "==> Done. Image: $OUT ($(du -h "$OUT" | cut -f1) actual, $(stat -c%s "$OUT") bytes apparent)"

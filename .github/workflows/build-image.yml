@@ -76,6 +76,16 @@ jobs:
         run: |
           sudo ./scripts/rpi-disk-image/build-disk-image.sh rpi-bootc.img 58G localhost/archlinux-rpi:latest /nonexistent-secrets.env
 
+      # actions/upload-artifact's zip does not reliably round-trip a large
+      # mostly-sparse file -- confirmed by hand: a downloaded copy came
+      # back truncated with real ext4 corruption on fsck, despite the
+      # build itself completing clean. zstd reads/writes the full logical
+      # byte stream and doesn't depend on sparse-file reconstruction, so
+      # compress before upload; decompress with `zstd -d --sparse` (or
+      # just `unzstd`) before flashing.
+      - name: Compress disk image for upload
+        run: sudo zstd -T0 -3 --sparse rpi-bootc.img -o rpi-bootc.img.zst
+
       - name: Save OCI image as artifact
         run: podman save localhost/archlinux-rpi:latest -o archlinux-rpi-oci.tar
 
@@ -87,4 +97,4 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: rpi-bootc-unprovisioned-img
-          path: rpi-bootc.img
+          path: rpi-bootc.img.zst
