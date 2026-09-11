@@ -15,7 +15,13 @@
 # Produces localhost/archlinux-arm-base:latest via:
 #   podman build -f Containerfile.rootfs -t localhost/archlinux-arm-base:latest .
 
-FROM --platform=$BUILDPLATFORM docker.io/archlinux/archlinux:latest AS fetch
+# linux/amd64, not $BUILDPLATFORM: docker.io/archlinux/archlinux has no
+# arm64 manifest at all, so this must always resolve to amd64 regardless
+# of what host is running the build -- on an amd64 host that's native, on
+# an arm64 host (e.g. CI) it runs this one small stage under emulation.
+# This stage is just curl/gpg/tar, architecture-independent work, so that
+# cost is minor and confined to one stage.
+FROM --platform=linux/amd64 docker.io/archlinux/archlinux:latest AS fetch
 
 # ALARM Build System signing key, pinned by fingerprint. Verified by hand
 # against the live key on 2026-09-11:

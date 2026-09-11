@@ -1,22 +1,25 @@
 name: Build aarch64 bootc image
 
 # Runs the same chain built and verified locally --
-# Containerfile.bootc -> Containerfile.rootfs -> Containerfile.base ->
-# Containerfile.rpi -- but natively on an arm64 runner instead of under
-# qemu-user emulation on x86_64. Native means the slow steps (pacman
-# under `pacman -Su`, dracut, mkinitcpio) run at real speed, and it means
-# no "execute a freshly built aarch64 binary under emulation" question
-# ever comes up: everything here already is aarch64 code on aarch64
-# silicon. Comparing this run's timing and output against the local
-# emulated build is the whole point, not just a speed convenience -- see
-# docs/bootc-build.md and docs/disk-image.md.
+# Containerfile.rootfs -> [Containerfile.bootc-native] -> Containerfile.base
+# -> Containerfile.rpi -- but natively on an arm64 runner instead of under
+# qemu-user emulation on x86_64. Comparing this run's timing and output
+# against the local emulated build is the whole point, not just a speed
+# convenience -- see docs/bootc-build.md and docs/disk-image.md.
+#
+# Containerfile.bootc-native replaces Containerfile.bootc here: the
+# x86_64 file cross-compiles FOR aarch64, which only makes sense starting
+# from an amd64 host. On a host that's already aarch64, cross-compiling
+# to aarch64 would mean running the entire amd64 toolchain under
+# emulation for no reason. Containerfile.rootfs's own fetch stage still
+# needs one small amd64-emulated step, since docker.io/archlinux/archlinux
+# has no arm64 manifest at all -- that's what setup-qemu-action is for.
 #
 # Deliberately does NOT inject secrets.env. That file is gitignored and
 # never reaches this runner. This produces an unprovisioned base image
-# (and, if disk-image build is enabled below, an unprovisioned .img);
-# turning that into the actual `citadel` image with real credentials is a
-# local-only step, run against secrets.env on disk, never in CI. See
-# scripts/rpi-disk-image/build-disk-image.sh.
+# (and disk image); turning that into the actual `citadel` image with
+# real credentials is a local-only step against secrets.env on disk,
+# never in CI. See scripts/rpi-disk-image/build-disk-image.sh.
 #
 # runs-on: adjust if GitHub's current arm64 hosted-runner label differs
 # from this at the time you read it -- labels have moved before.
@@ -39,11 +42,19 @@ jobs:
       - name: Confirm native arm64
         run: uname -m
 
-      - name: Build bootc cross-compile stage
-        run: time podman build -f Containerfile.bootc -t localhost/bootc-aarch64-builder:v1.16.10 .
+      # Only Containerfile.rootfs's fetch stage needs this (amd64,
+      # docker.io/archlinux/archlinux has no arm64 manifest). Everything
+      # aarch64-targeted in this workflow runs natively without it.
+      - name: Register amd64 emulation for the one stage that needs it
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: amd64
 
       - name: Build ALARM rootfs
         run: time podman build -f Containerfile.rootfs -t localhost/archlinux-arm-base:latest .
+
+      - name: Build bootc natively
+        run: time podman build -f Containerfile.bootc-native -t localhost/bootc-aarch64-builder:v1.16.10 .
 
       - name: Build bootc base
         run: time podman build -f Containerfile.base -t localhost/archlinux-rpi-base:latest .

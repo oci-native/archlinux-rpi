@@ -1,0 +1,47 @@
+# aarch64 bootc builder stage, native build for a native aarch64 host
+# (i.e. the CI arm64 runner -- see .github/workflows/build-image.yml).
+#
+# Containerfile.bootc cross-compiles bootc FROM amd64 TO aarch64, which is
+# the right approach on an amd64 host but pointless (and slow: it would
+# run its entire amd64 toolchain under qemu emulation) on a host that's
+# already aarch64. This is that same recipe with the cross-compilation
+# machinery removed -- same shape as the x86_64 sibling's own
+# bootc-builder stage in /home/bupd/Projects/archlinux/Containerfile.base,
+# just pointed at the ALARM aarch64 base instead of docker.io/archlinux/archlinux.
+#
+# Produces the same output tag Containerfile.base expects
+# (localhost/bootc-aarch64-builder:v1.16.10), so Containerfile.base itself
+# needs no changes to consume either this or Containerfile.bootc's output.
+
+FROM localhost/archlinux-arm-base:latest AS bootc-native-builder
+
+ARG BOOTC_VERSION=v1.16.10
+
+RUN sed -i '/^[[:space:]]*DownloadUser[[:space:]]/d' /etc/pacman.conf
+
+RUN --mount=type=cache,dst=/root/.cargo/registry \
+    --mount=type=cache,dst=/root/.cargo/git \
+    pacman -Sy --needed --noconfirm \
+        git \
+        glib2 \
+        go-md2man \
+        make \
+        ostree \
+        pkgconf \
+        rust
+
+WORKDIR /tmp/bootc
+# Same memory guards as Containerfile.bootc/Containerfile.base (x86_64):
+# upstream's release profile enables thin LTO and full debug info, and the
+# final link can exceed what rootless Podman hands the build.
+ENV CARGO_BUILD_JOBS=1 \
+    CARGO_PROFILE_RELEASE_DEBUG=0 \
+    CARGO_PROFILE_RELEASE_LTO=false
+RUN git clone --branch "${BOOTC_VERSION}" --depth 1 \
+        https://github.com/bootc-dev/bootc.git . && \
+    make bin install-all DESTDIR=/output
+
+RUN rm -f /output/usr/bin/bootc-integration-tests && \
+    strip --strip-unneeded \
+        /output/usr/bin/bootc \
+        /output/usr/bin/system-reinstall-bootc
