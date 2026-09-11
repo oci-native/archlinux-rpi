@@ -5,12 +5,68 @@ Owner: BOOTC BINARY workstream. Companion to `Containerfile.bootc` and
 `STATUS.md` first; this doc doesn't repeat the settled decisions recorded
 there.
 
-**Status as of this writing: work stopped mid-build for a team handoff, not
-because of a blocker.** See the HANDOFF section at the end before doing
-anything else. The cross-compile is proven to work through the risky part
-(linking `-sys` crates against a foreign-arch sysroot); it was not run to
-completion, and nothing has been verified on real hardware or even inside a
-finished container image yet.
+**Status as of this writing: the build actually ran to completion of the
+dependency graph and hit a real, concrete link failure, discovered via a
+background monitor a few minutes after the rest of this doc was written for
+handoff.** This is a genuine blocker, not a "ran out of time" gap — see the
+new section immediately below and the updated HANDOFF at the end. Everything
+else in this doc (version pin, sysroot assembly, toolchain choice) still
+stands; the `*-sys` crates all still linked clean. The failure is narrow and
+specific: two libraries, not the whole approach.
+
+## CONFIRMED BLOCKER: final link picks up host libm.so.6, not the sysroot's
+
+Full build log tail (from `system-reinstall-bootc`, the first binary cargo
+tried to link):
+
+```
+error: linking with `/usr/local/bin/aarch64-sysroot-gcc` failed: exit status: 1
+  = note: /usr/aarch64-linux-gnu/bin/ld: skipping incompatible /lib/libm.so.6 when searching for /lib/libm.so.6
+          /usr/aarch64-linux-gnu/bin/ld: cannot find /lib/libm.so.6: file in wrong format
+          /usr/aarch64-linux-gnu/bin/ld: skipping incompatible /lib/libm.so.6 when searching for /lib/libm.so.6
+          /usr/aarch64-linux-gnu/bin/ld: skipping incompatible /lib/libmvec.so.1 when searching for /lib/libmvec.so.1
+          /usr/aarch64-linux-gnu/bin/ld: cannot find /lib/libmvec.so.1: file in wrong format
+          /usr/aarch64-linux-gnu/bin/ld: skipping incompatible /lib/libmvec.so.1 when searching for /lib/libmvec.so.1
+          collect2: error: ld returned 1 exit status
+error: could not compile `system-reinstall-bootc` (bin "system-reinstall-bootc") due to 1 previous error
+```
+
+`-lm` resolved to the literal path `/lib/libm.so.6` and ld found an
+*x86_64* file there ("wrong format") — i.e. the build container's own real
+`/lib` (Arch is usr-merged, `/lib -> usr/lib`, and this is the x86_64
+`archlinux:latest` builder's own native libm, not anything from
+`/sysroot-aarch64`). `-lc` (glibc proper) resolved fine — no complaint about
+libc — so whatever's going wrong is specific to `libm.so`/`libmvec.so.1`,
+not a wholesale failure of `--sysroot` handling.
+
+**Hypothesis, UNCONFIRMED — did not verify by opening the file**: glibc's
+`usr/lib/libm.so` is, like `usr/lib/libc.so`, a GNU ld linker script
+(`GROUP ( /lib/libm.so.6 ... )` is the standard glibc pattern) with an
+absolute path baked in. GNU ld's documented behavior is to treat a leading
+`/` in a linker-script `GROUP`/`INPUT` path as sysroot-relative when
+`--sysroot` is active — that's exactly what made `libc.so`'s equivalent
+script work when reading it by hand earlier in this build. If `libm.so`'s
+script also has a leading `/lib/...`, it should get the same rewrite. Since
+it apparently didn't, either: (a) our sysroot's `usr/lib/libm.so` is not
+actually present/not actually a script (worth literally `cat`-ing it — not
+done yet), or (b) something about how `-lm` specifically gets resolved
+(versus the implicit `-lc` pulled in by `-nodefaultlibs` handling) takes a
+different code path in this ld version that doesn't apply the sysroot
+rewrite the same way. This needs to be checked by hand, not guessed at
+further — see HANDOFF.
+
+**Wall clock, now a real number**: `time` on the full `cargo build --release
+--target aarch64-unknown-linux-gnu --bins` invocation (`CARGO_BUILD_JOBS=1`)
+through to this failure: **real 5m51.3s** (user 5m22.6s, sys 0m22.6s), on
+the 12-core/31GiB host, single-job serialized. This is the cost of
+compiling essentially all of bootc's dependency graph (ostree-ext,
+composefs-rs, tokio, etc.) plus `bootc-lib` itself, before the first link
+attempt fails. Since `CARGO_BUILD_JOBS=1` was in effect for this whole
+invocation (not just the final link), this number is inflated relative to
+what a full concurrent-codegen build would take, but that's what
+`Containerfile.base`'s x86 build also pays for the same OOM-avoidance
+reason — the two aren't directly comparable to a hypothetical unconstrained
+build, only to each other.
 
 ## Version pinned — CONFIRMED
 
