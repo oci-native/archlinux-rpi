@@ -1,0 +1,75 @@
+name: Build aarch64 bootc image
+
+# Runs the same chain built and verified locally --
+# Containerfile.bootc -> Containerfile.rootfs -> Containerfile.base ->
+# Containerfile.rpi -- but natively on an arm64 runner instead of under
+# qemu-user emulation on x86_64. Native means the slow steps (pacman
+# under `pacman -Su`, dracut, mkinitcpio) run at real speed, and it means
+# no "execute a freshly built aarch64 binary under emulation" question
+# ever comes up: everything here already is aarch64 code on aarch64
+# silicon. Comparing this run's timing and output against the local
+# emulated build is the whole point, not just a speed convenience -- see
+# docs/bootc-build.md and docs/disk-image.md.
+#
+# Deliberately does NOT inject secrets.env. That file is gitignored and
+# never reaches this runner. This produces an unprovisioned base image
+# (and, if disk-image build is enabled below, an unprovisioned .img);
+# turning that into the actual `citadel` image with real credentials is a
+# local-only step, run against secrets.env on disk, never in CI. See
+# scripts/rpi-disk-image/build-disk-image.sh.
+#
+# runs-on: adjust if GitHub's current arm64 hosted-runner label differs
+# from this at the time you read it -- labels have moved before.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman
+
+      - name: Confirm native arm64
+        run: uname -m
+
+      - name: Build bootc cross-compile stage
+        run: time podman build -f Containerfile.bootc -t localhost/bootc-aarch64-builder:v1.16.10 .
+
+      - name: Build ALARM rootfs
+        run: time podman build -f Containerfile.rootfs -t localhost/archlinux-arm-base:latest .
+
+      - name: Build bootc base
+        run: time podman build -f Containerfile.base -t localhost/archlinux-rpi-base:latest .
+
+      - name: Build Pi image
+        run: time podman build -f Containerfile.rpi -t localhost/archlinux-rpi:latest .
+
+      - name: Verify bootc --version
+        run: podman run --rm localhost/archlinux-rpi:latest bootc --version
+
+      - name: Verify container lint (unskipped -- native, no ENOSYS expected)
+        run: podman run --rm --privileged localhost/archlinux-rpi:latest bootc container lint
+
+      - name: Build unprovisioned disk image
+        run: |
+          sudo ./scripts/rpi-disk-image/build-disk-image.sh rpi-bootc.img 58G localhost/archlinux-rpi:latest /nonexistent-secrets.env
+
+      - name: Save OCI image as artifact
+        run: podman save localhost/archlinux-rpi:latest -o archlinux-rpi-oci.tar
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archlinux-rpi-oci
+          path: archlinux-rpi-oci.tar
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpi-bootc-unprovisioned-img
+          path: rpi-bootc.img

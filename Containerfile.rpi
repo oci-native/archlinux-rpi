@@ -54,6 +54,15 @@ RUN kver="$(ls /usr/lib/modules)" && \
         '# firmware partition for board-wide settings instead of this file.' \
         > "/usr/lib/modules/${kver}/rpi-config.txt"
 
+# Static default kargs (docs/kernel-layout.md decision 3): no hardcoded
+# root=, bootc/ostree supplies that from the BLS entry. console=serial0
+# is the Pi firmware's own alias for the primary UART, matched with
+# enable_uart=1 in config-bootc-common.txt (seed-firmware.sh).
+RUN install -d /usr/lib/bootc/kargs.d && \
+    printf '%s\n' \
+        'kargs = ["rootwait", "console=serial0,115200"]' \
+        > /usr/lib/bootc/kargs.d/10-rpi-serial-console.toml
+
 COPY docs/rpi-bootc-bootloader.arch-proposed /usr/bin/rpi-bootc-bootloader
 COPY docs/rpi-bootc-bootloader.service.arch-proposed /usr/lib/systemd/system/ostree-finalize-staged.service.d/rpi-bootc-bootloader.conf
 RUN chmod 0755 /usr/bin/rpi-bootc-bootloader && \
