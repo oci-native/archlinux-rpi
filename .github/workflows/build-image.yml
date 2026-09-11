@@ -21,6 +21,13 @@ name: Build aarch64 bootc image
 # real credentials is a local-only step against secrets.env on disk,
 # never in CI. See scripts/rpi-disk-image/build-disk-image.sh.
 #
+# Downloading the .img.zst artifact: `zstd -d --sparse rpi-bootc.img.zst
+# -o rpi-bootc.img` alone is not enough if the disk's tail is entirely
+# zero -- confirmed by hand, the decompressed file came out short
+# (~1.8GB instead of the full 58GiB). Always follow it with
+# `truncate -s 58G rpi-bootc.img` (or the exact byte count printed by the
+# build step) to restore the correct apparent size before flashing.
+#
 # runs-on: adjust if GitHub's current arm64 hosted-runner label differs
 # from this at the time you read it -- labels have moved before.
 on:

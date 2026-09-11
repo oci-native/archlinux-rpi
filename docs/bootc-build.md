@@ -287,8 +287,20 @@ cross build (`cargo build --release --target aarch64-unknown-linux-gnu
 --bins`, `CARGO_BUILD_JOBS=1`) took 7m05s.** Total build (toolchain
 install, sysroot assembly, native manpages, cross build, install, strip)
 was a few minutes more on top of that. This is the number to use for
-planning; the hand-iterated numbers below are debugging artifacts, not
-representative of a real build.
+planning on x86_64; the hand-iterated numbers below are debugging
+artifacts, not representative of a real build.
+
+**For comparison, native on an arm64 GitHub Actions runner** (no
+cross-compilation, no `CARGO_BUILD_JOBS=1` -- see `Containerfile.bootc-native`
+and the note in its own file about why that env var doesn't apply to a
+native build): a cold build of the same ~150-crate dependency graph took
+**9m57s**. Slower in absolute terms than the x86_64 cross build despite
+not paying any emulation or cross-toolchain cost, most likely a smaller
+core count / weaker per-core throughput on the free-tier arm64 runner
+than this project's 12-core x86_64 dev host -- not a sign that cross
+vs. native matters here, the rootfs/kernel/dracut steps around it were
+dramatically faster natively (minutes vs. tens of minutes under
+emulation), just not this one CPU-bound compile.
 
 | step (hand-iterated debugging run) | time |
 | --- | --- |

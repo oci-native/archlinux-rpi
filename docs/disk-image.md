@@ -46,7 +46,21 @@ install. Worked around two ways: `build-disk-image.sh` now verifies the
 image in place, using the same mounts, immediately after install (before
 any upload ever touches it), and the CI workflow now `zstd --sparse`
 compresses the `.img` before upload instead of handing the raw file to
-`actions/upload-artifact` directly.
+`actions/upload-artifact` directly. `zstd -d --sparse` on the download
+side is not quite sufficient either -- if the disk's tail is entirely
+zero, the decompressed file comes out short (confirmed: ~1.8 GB instead
+of the full 58 GiB). Always follow decompression with `truncate -s 58G`
+(or the exact byte count the build prints) before flashing.
+
+**Confirmed clean run, with the fixes above, via `workflow_dispatch`**
+(run 34619559977): all 9 in-place checks passed --
+`config.txt exists`, `bootc/entries/ostree-1/ exists` (with vmlinuz,
+initrd, cmdline.txt, and dtbs all present inside it), `os_prefix points
+at ostree-1`, and both the ostree deployment and repo present under
+`/sysroot`. Native wall clock, GitHub-hosted arm64 runner: rootfs 2m10s,
+bootc (native, no cross-compilation) 9m57s, base 41s, Pi image 9s, full
+job including the disk-image build, in-place verification, compression
+and both artifact uploads: **17m30s total**.
 
 **Not yet done:** provisioning with real secrets (deliberately CI never
 sees `secrets.env`; that's a local-only run once local root access is
