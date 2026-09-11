@@ -75,6 +75,18 @@ trap cleanup EXIT
 echo "==> Creating sparse ${SIZE} image at ${OUT}"
 truncate -s "$SIZE" "$OUT"
 
+echo "==> Transferring ${IMAGE_REF} into root's podman storage"
+# This script runs under sudo, so `podman` here is root's own podman --
+# a completely separate image store from whichever unprivileged user
+# actually built $IMAGE_REF (rootless podman storage is per-user). Without
+# this, `bootc install to-disk` can't find $IMAGE_REF locally and falls
+# through to a registry pull for "localhost/...", which fails outright.
+if [[ -n "${SUDO_USER:-}" ]] && ! podman image exists "$IMAGE_REF"; then
+	sudo -u "$SUDO_USER" podman save "$IMAGE_REF" -o "$SCRATCH/image.tar"
+	podman load -i "$SCRATCH/image.tar"
+	rm -f "$SCRATCH/image.tar"
+fi
+
 echo "==> Installing ${IMAGE_REF} to ${OUT} via loopback"
 # Canonical bootc install-to-disk invocation (podman run of the very image
 # being installed, --privileged + --pid=host + containers-storage bind
