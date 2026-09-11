@@ -318,9 +318,18 @@ step of both `Containerfile.base` and `Containerfile.rpi`. `Containerfile.base`
 relocate from) passes with one expected warning (`nonempty-boot`).
 `Containerfile.rpi`'s final image passes with **zero warnings**: 11 checks
 passed, 3 skipped (the two forced skips plus one bootupd-related check
-that doesn't apply without bootupd). The skips are still necessary:
-bootc-dev/bootc#1481 is unfixed, confirmed by the fact the build needed
-them to pass at all under this qemu-user emulation.
+that doesn't apply without bootupd). Under this qemu-user emulation the
+skips are necessary -- the build needed them to pass at all.
+
+**Confirmed the skips are an emulation artifact, not a real bug that
+would also hit the Pi.** The GitHub Actions arm64 runner (native aarch64,
+no emulation) ran `bootc container lint` on the same final image with
+**no skip flags at all**: 13 checks passed, 1 skipped (unrelated,
+bootupd). `var-tmpfiles` and `utf8` both passed natively. This matches
+bootc-dev/bootc#1481's own diagnosis (`openat2`/`set_robust_list`
+returning ENOSYS specifically under qemu-user) and means: keep the skips
+for any emulated build step, drop them for the real verification pass on
+an actual Pi.
 
 ## AUR alternative, evaluated and rejected — CONFIRMED
 
