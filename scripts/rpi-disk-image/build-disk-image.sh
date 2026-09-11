@@ -82,9 +82,13 @@ echo "==> Transferring ${IMAGE_REF} into root's podman storage"
 # this, `bootc install to-disk` can't find $IMAGE_REF locally and falls
 # through to a registry pull for "localhost/...", which fails outright.
 if [[ -n "${SUDO_USER:-}" ]] && ! podman image exists "$IMAGE_REF"; then
-	sudo -u "$SUDO_USER" podman save "$IMAGE_REF" -o "$SCRATCH/image.tar"
-	podman load -i "$SCRATCH/image.tar"
-	rm -f "$SCRATCH/image.tar"
+	# $SCRATCH is root's own mktemp -d (mode 0700) -- $SUDO_USER can't
+	# write into it. Have them create and own their own tmpfile instead;
+	# root can still read it fine to load it, then remove it.
+	IMAGE_TAR="$(sudo -u "$SUDO_USER" mktemp)"
+	sudo -u "$SUDO_USER" podman save "$IMAGE_REF" -o "$IMAGE_TAR"
+	podman load -i "$IMAGE_TAR"
+	rm -f "$IMAGE_TAR"
 fi
 
 echo "==> Installing ${IMAGE_REF} to ${OUT} via loopback"
