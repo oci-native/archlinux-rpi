@@ -125,6 +125,30 @@ touches no namespaces. Confirmed under emulation -- it returns
 `booted: null, staged: null`, which is exactly the fresh-install case the
 hook's single-deployment fallback already handles.
 
+**Local provisioning half confirmed working, end to end.** Ran against a
+CI-built `.img` on the x86_64 workstation: loop device set up, both
+partitions mounted, 17/17 VideoCore blobs seeded, `provision-secrets.sh`
+executed for the first time ever, `rpi-bootc-bootloader sync` run
+(emulated, found `Entries: 1` as expected), and **all 16 verification
+checks passed** -- the 9 structural ones plus `hostname is citadel`, NM
+wifi profile present at mode 600, `bupd` in passwd with a `$6$` hash and
+in `wheel`, and both sshd and NetworkManager enabled. 47 seconds wall
+clock, exit 0.
+
+Two real bugs were found by doing this rather than reasoning about it.
+`provision-secrets.sh` had never been executed at all. And running it
+against a deployment tree extracted from the built image showed ALARM
+enables `systemd-networkd` while also shipping `en.network`/`eth.network`
+with `DHCP=yes` matching `en*` -- and the Pi 5's onboard NIC is `end0`,
+so networkd and NetworkManager would both have run a DHCP client on it,
+with both wait-online units enabled on top. Fixed in `Containerfile.base`.
+
+Wifi firmware was checked rather than assumed: `firmware-raspberrypi`
+ships `brcmfmac43455-sdio.raspberrypi,5-model-b.{bin,clm_blob,txt}` into
+`/usr/lib/firmware/updates/brcm/` (the kernel's higher-priority override
+directory, which is why a check for `/usr/lib/firmware/brcm` misleadingly
+comes up empty), plus `regulatory.db` and `BCM4345C5.hcd` for Bluetooth.
+
 **Not yet done:** anything involving actual Pi hardware (nothing has
 booted a physical board yet).
 
