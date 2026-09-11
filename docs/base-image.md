@@ -238,7 +238,38 @@ satisfies the "keyring is valid" requirement. **This cleanup step was identified
 never actually executed** — it's the very next thing that was queued when the cutoff
 arrived.
 
-## What is NOT done — be honest about this
+## Done — finished, verified against a real image
+
+`Containerfile.rootfs` exists, builds clean with `podman build -f
+Containerfile.rootfs -t localhost/archlinux-arm-base:latest .`, and
+`COPY --from=<amd64 stage>` into a `linux/arm64` stage works exactly as
+plain-file-copy semantics predicted (previously an untested assumption).
+
+The task's verify command was run for real:
+
+```
+podman run --rm --platform linux/arm64 localhost/archlinux-arm-base:latest \
+  sh -c "pacman -Sy --noconfirm && pacman -Q base && uname -m"
+```
+
+Output: `base 3-3`, `aarch64`. Also checked directly against the image's
+committed layers (not just `podman run`, see the hostname trap correction
+below): `alarm` user and `/home/alarm` gone (confirmed via an overlay
+whiteout, `home/.wh.alarm`, in the saved image tar), `/etc/ssh` gone
+entirely, root's shadow entry is `!` (locked), `/boot` empty,
+`/etc/machine-id` and `/etc/hostname` both 0 bytes in the final effective
+layer.
+
+The scoping question (generic ARM base vs. bootc-specific transformations)
+is resolved: this image stays generic, no ostree/composefs/bootc content.
+`Containerfile.base` (`FROM localhost/archlinux-arm-base:latest`) is where
+the bootc-specific layer starts.
+
+## What is NOT done — superseded, kept for the record below
+
+Everything in this section is now done (see "Done" above) except where
+noted. Left in place because the reasoning and the corrected trap are
+still worth reading.
 
 - **No `Containerfile.rootfs` file exists on disk.** Only designed in-conversation, not
   written. The intended shape (reasoned but untested):
@@ -359,9 +390,15 @@ arrived.
    than left as an assumption.
 
 **Traps for the next person (repeated here so they're not missed by skimming):**
-- `/etc/hostname` scrub: truncate (`: >`), never `rm -f` — the file is bind-mounted by
-  the container runtime and unlinking it fails with a confusing "device busy" that has
-  nothing to do with the image itself.
+- `/etc/hostname` scrub: **correction, this was wrong.** `RUN : > /etc/hostname`
+  doesn't error, but it doesn't work either -- the file is bind-mounted for the
+  duration of a `RUN` step (same as at `podman run` time), so the truncate lands on
+  the ephemeral mount and produces no layer diff at all. The tarball's baked-in
+  `alarm\n` silently survives, and `podman run ... cat /etc/hostname` won't catch it
+  either, since that read goes through the same bind mount. Caught by extracting the
+  built image's actual layers (`podman save` + `tar -tvf` each layer) and finding
+  `alarm\n` still there. Fix: `COPY` an empty file to `/etc/hostname` instead --
+  `COPY` writes directly to the layer, not through a live bind-mounted container.
 - Don't `pacman -Syu` before pruning. It works, but wastes several minutes rebuilding a
   kernel initramfs that's about to be deleted.
 - The Landlock/`DownloadUser` sandbox failure under qemu looks alarming (mentions

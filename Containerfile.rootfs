@@ -66,10 +66,19 @@ RUN sed -i '/^DownloadUser/d' /etc/pacman.conf && \
 # userdel -r alone doesn't reliably remove /home/alarm under a rootless
 # userns, and can exit non-zero even when the account itself is gone --
 # tolerate that and force the home directory removal explicitly.
+#
+# /etc/hostname is bind-mounted into the container for the duration of a
+# RUN step, same as at `podman run` time -- `RUN : > /etc/hostname` writes
+# to that ephemeral mount and produces no layer diff at all, so the
+# tarball's baked-in "alarm" survives uncaught. COPY writes straight to
+# the layer and isn't subject to this. Caught by checking the actual
+# committed layer content, not `podman run`'s output (which reads through
+# the same bind mount and would have shown a clean file either way).
+COPY empty-file /etc/hostname
+
 RUN { userdel -r alarm || true; } && rm -rf /home/alarm && \
     usermod -p '!' root && \
     : > /etc/machine-id && \
-    : > /etc/hostname && \
     rm -rf /etc/ssh && \
     pacman -Scc --noconfirm && \
     rm -rf /boot/* && \
