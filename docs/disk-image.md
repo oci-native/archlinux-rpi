@@ -149,6 +149,68 @@ ships `brcmfmac43455-sdio.raspberrypi,5-model-b.{bin,clm_blob,txt}` into
 directory, which is why a check for `/usr/lib/firmware/brcm` misleadingly
 comes up empty), plus `regulatory.db` and `BCM4345C5.hcd` for Bluetooth.
 
+## Flashing: what actually went wrong, and why the image is 25G
+
+The first real flash wrote a 50G image to the 64GB card and failed after
+66 minutes:
+
+```
+50524585984 bytes (51 GB, 47 GiB) copied, 3944 s, 12.8 MB/s
+dd: error writing '/dev/sdb': No space left on device
+dd: fsync failed for '/dev/sdb': Input/output error
+```
+
+`No space left on device` is misleading and the card is not too small --
+it reports 124735488 512-byte sectors, 63864569856 bytes, 59.48 GiB, so a
+50 GiB image fits with 9 GiB to spare. The kernel log says what really
+happened:
+
+```
+device offline error, dev sdb, sector 92915392 op 0x1:(WRITE)
+Buffer I/O error on dev sdb, logical block 11614424, lost async page write
+usb-storage 3-4:1.0: USB Mass Storage device detected
+scsi host6: usb-storage 3-4:1.0
+```
+
+The reader dropped off the USB bus mid-write and re-enumerated. ENOSPC was
+just the errno that surfaced once the device was gone. Causes are the
+usual ones for a long sustained write to a bus-powered reader: power sag,
+heat, a marginal cable or port.
+
+Two things follow, and both are now in the repo:
+
+1. **Write less.** The deployment is ~3 GB regardless of image size; the
+   rest is zeroes that `dd` still has to physically write. At 12-13 MB/s
+   a 50G image is over an hour of exposure to a failure whose probability
+   grows with duration. `shrink-image.sh` resizes the root down so the
+   flash is 25 GiB, and the workflow's size is now an input rather than a
+   constant.
+2. **Use `oflag=direct`.** The failure took out `fsync` as well as the
+   write, which is the signature of a large dirty page cache being flushed
+   at a reader that cannot keep up. Direct I/O writes through instead of
+   accumulating gigabytes of dirty pages.
+
+`conv=sparse` looks tempting -- it would skip the ~22 GiB of zeroes and
+finish in minutes -- but do not use it on a card with prior data. An
+all-zero block in the source is not always "don't care": an all-zero ext4
+inode-table block means *these inodes are free*, and skipping it leaves
+whatever the card held before, which ext4 will read back as garbage
+inodes. Only safe onto media already known to be zeroed, which costs the
+same write anyway.
+
+**`wipefs -a` does not necessarily clear the backup GPT.** After the
+interrupted 50G write, `wipefs -a /dev/sdb` reported erasing only the
+primary GPT at 0x200 and the PMBR. The GPT it found declared the disk as
+50 GiB, so it looked for the backup header at the 50 GiB mark rather than
+at the card's true last sector, leaving the older backup header in place.
+Harmless for booting -- firmware and kernel both read the primary table --
+but it makes `gdisk`/`sfdisk` report a PMBR size mismatch. Clear it
+explicitly with the card's real sector count:
+
+```
+sudo dd if=/dev/zero of=/dev/sdX bs=512 seek=$(( $(cat /sys/block/sdX/size) - 33 )) count=33 conv=fsync
+```
+
 **Not yet done:** anything involving actual Pi hardware (nothing has
 booted a physical board yet).
 
