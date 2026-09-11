@@ -15,10 +15,16 @@ approves the layout.
 1. **Boot route: native Raspberry Pi firmware.** No UEFI, no U-Boot, no GRUB, no bootupd.
    The VideoCore firmware acts as the A/B bootloader through `os_prefix` in `config.txt`.
    This is the mechanism `AlmaLinux/bootc-images-rpi` uses and it is proven on Pi 3/4/5.
-2. **bootc backend: ostree, not composefs.** `--bootloader=none` is unsupported on the
-   composefs backend, that backend only knows Grub and systemd-boot, and the Pi sync hook
-   reads `/boot/loader/entries/ostree-N.conf` plus `/sysroot/ostree/deploy/...`, which is
-   ostree layout. So `/usr/lib/ostree/prepare-root.conf` sets `composefs enabled = no`.
+2. **bootc storage backend: ostree. composefs deployment format: ON.** These are two
+   different things that share a word, and an earlier version of this brief conflated them.
+   `[composefs] enabled = yes` in `/usr/lib/ostree/prepare-root.conf` is an ostree-internal
+   setting for whether deployment checkouts are stored as composefs images. It still uses
+   `/ostree/repo`, `/sysroot/ostree/deploy/...` and `/boot/loader/entries/ostree-N.conf`,
+   which are the paths the sync hook reads, so it is compatible and we keep it on, matching
+   both AlmaLinux and the x86_64 sibling image. What `--bootloader=none` cannot be combined
+   with is bootc's separate `--composefs-backend`, an experimental composefs-rs storage
+   backend with its own on-disk format at `/composefs`. Do not pass that flag, and do not
+   ship a UKI, since a UKI makes bootc select that backend automatically.
 3. **Initramfs: dracut**, matching the existing x86_64 image. Not mkinitcpio.
 
 ## Reference material, already cloned locally

@@ -63,19 +63,37 @@ Rejected alternatives, with reasons:
   unmerged; PR #1073 validated on a real Pi 4 but not merged as of today. Nothing to
   wait for.
 
-### bootc backend: ostree, NOT composefs
+### bootc storage backend: ostree. composefs deployment format: kept on
 
-This is the one hard divergence from `Containerfile.pc`, and it is not a preference:
+Corrected 2026-09-11. An earlier version of this document said the Pi image had to set
+`composefs enabled = no`, on the grounds that `--bootloader=none` is unsupported on the
+composefs backend. That reasoning conflated two separate things that share a word.
 
-- `--bootloader=none` is documented as unsupported on the composefs backend.
-- The composefs backend's bootloader kinds are Grub and systemd-boot only; it writes its
-  own BLS entries in Rust and does not use `/ostree/repo` at all.
-- The sync hook reads `/boot/loader/entries/ostree-N.conf` and
-  `/sysroot/ostree/deploy/...` directly, which is pure ostree layout.
+`[composefs] enabled` in `/usr/lib/ostree/prepare-root.conf` controls whether the **ostree
+backend** stores its per-deployment checkouts as composefs images, for fsverity and
+integrity. It still keeps `/ostree/repo`, `/sysroot/ostree/deploy/...` and
+`/boot/loader/entries/ostree-N.conf`, which are exactly the paths the sync hook reads.
 
-So the Pi image sets `composefs enabled = no` in
-`/usr/lib/ostree/prepare-root.conf`. The x86 image keeps composefs. Revisit when the
-composefs backend grows a non-EFI bootloader kind.
+`--composefs-backend` is a different thing: bootc's experimental composefs-rs storage
+backend, with its own on-disk format at `/composefs` and `/state/deploy/...` and no ostree
+repository at all. That is what `--bootloader=none` cannot be combined with.
+
+Verified empirically rather than argued. `quay.io/almalinuxorg/almalinux-bootc-rpi:10`,
+pulled and inspected directly, ships:
+
+    [composefs]
+    enabled = yes
+    [sysroot]
+    readonly = true
+
+That image is reported working on real Pi 3, 4 and 5 hardware through the same
+native-firmware boot path this project is copying. It also matches the x86_64 sibling,
+whose `Taskfile.yml` validate task already asserts `enabled = yes` as an invariant.
+
+So: keep composefs enabled, use the ostree backend, pass `--bootloader none`, do not pass
+`--composefs-backend`, and do not ship a UKI, because a UKI makes bootc select the
+composefs backend automatically. This is now one less divergence from `Containerfile.pc`,
+not one more.
 
 ### Base: Arch (ALARM), confirmed stocked
 
