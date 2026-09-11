@@ -31,11 +31,15 @@ RUN --mount=type=cache,dst=/root/.cargo/registry \
         rust
 
 WORKDIR /tmp/bootc
-# Same memory guards as Containerfile.bootc/Containerfile.base (x86_64):
-# upstream's release profile enables thin LTO and full debug info, and the
-# final link can exceed what rootless Podman hands the build.
-ENV CARGO_BUILD_JOBS=1 \
-    CARGO_PROFILE_RELEASE_DEBUG=0 \
+# Skip thin LTO and full debuginfo (upstream's release profile enables
+# both) to bound peak memory at the final link, same reasoning as
+# Containerfile.bootc/Containerfile.base. Do NOT also set
+# CARGO_BUILD_JOBS=1 here: that was needed for the x86_64 cross-compile's
+# specific link-time memory pressure, not for an ordinary native build --
+# serializing the entire ~150-crate compile onto one core for that reason
+# would waste most of the runner's cores for no benefit. Cost real time
+# finding this: it's what made the first CI run crawl.
+ENV CARGO_PROFILE_RELEASE_DEBUG=0 \
     CARGO_PROFILE_RELEASE_LTO=false
 RUN git clone --branch "${BOOTC_VERSION}" --depth 1 \
         https://github.com/bootc-dev/bootc.git . && \
