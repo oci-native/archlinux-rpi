@@ -70,6 +70,13 @@ else
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=scripts/rpi-disk-image/podman-store.sh
+source "$REPO_ROOT/scripts/rpi-disk-image/podman-store.sh"
+
+# Needed before the sync step below, and worth failing on now rather than
+# after the loop device and mounts are already set up.
+ensure_root_has_image "$IMAGE_REF"
+
 SCRATCH="$(mktemp -d)"
 LOOP=""
 BOUND=0

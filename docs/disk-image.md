@@ -47,10 +47,13 @@ image in place, using the same mounts, immediately after install (before
 any upload ever touches it), and the CI workflow now `zstd --sparse`
 compresses the `.img` before upload instead of handing the raw file to
 `actions/upload-artifact` directly. `zstd -d --sparse` on the download
-side is not quite sufficient either -- if the disk's tail is entirely
-zero, the decompressed file comes out short (confirmed: ~1.8 GB instead
-of the full 58 GiB). Always follow decompression with `truncate -s 58G`
-(or the exact byte count the build prints) before flashing.
+side was once observed to come out short (~1.8 GB instead of the full
+58 GiB) when the disk's tail was entirely zero. That did not reproduce on
+a later download of the same artifact, which decompressed to the full
+62277025792 bytes apparent, 2.9 GB actual. Since it is one command and
+costs nothing, always follow decompression with `truncate -s 50G` (or the
+exact byte count the build prints) and confirm with `stat -c%s` before
+flashing rather than assuming either behaviour.
 
 **Confirmed clean run, with the fixes above, via `workflow_dispatch`**
 (run 34619559977): all 9 in-place checks passed --

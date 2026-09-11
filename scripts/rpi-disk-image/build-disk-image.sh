@@ -38,6 +38,8 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=scripts/rpi-disk-image/podman-store.sh
+source "$REPO_ROOT/scripts/rpi-disk-image/podman-store.sh"
 
 # Hard arch guard. `bootc install to-disk` re-execs itself into the host
 # mount namespace: it opens /proc/1/ns/mnt and calls setns(fd,
@@ -99,21 +101,7 @@ fi
 echo "==> Creating sparse ${SIZE} image at ${OUT}"
 truncate -s "$SIZE" "$OUT"
 
-echo "==> Transferring ${IMAGE_REF} into root's podman storage"
-# This script runs under sudo, so `podman` here is root's own podman -- a
-# completely separate image store from whichever unprivileged user
-# actually built $IMAGE_REF (rootless podman storage is per-user).
-# Without this, `bootc install to-disk` can't find $IMAGE_REF locally and
-# falls through to a registry pull for "localhost/...", which fails.
-if [[ -n "${SUDO_USER:-}" ]] && ! podman image exists "$IMAGE_REF"; then
-	# $SCRATCH-style root mktemp is mode 0700 -- $SUDO_USER can't write
-	# into it. Have them create and own their own tmpfile instead; root
-	# can still read it to load, then remove it.
-	IMAGE_TAR="$(sudo -u "$SUDO_USER" mktemp)"
-	sudo -u "$SUDO_USER" podman save "$IMAGE_REF" -o "$IMAGE_TAR"
-	podman load -i "$IMAGE_TAR"
-	rm -f "$IMAGE_TAR"
-fi
+ensure_root_has_image "$IMAGE_REF"
 
 echo "==> Installing ${IMAGE_REF} to ${OUT} via loopback"
 # Canonical bootc install-to-disk invocation: podman run of the very image
