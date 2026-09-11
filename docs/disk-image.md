@@ -62,11 +62,68 @@ bootc (native, no cross-compilation) 9m57s, base 41s, Pi image 9s, full
 job including the disk-image build, in-place verification, compression
 and both artifact uploads: **17m30s total**.
 
-**Not yet done:** provisioning with real secrets (deliberately CI never
-sees `secrets.env`; that's a local-only run once local root access is
-sorted -- see docs/bootc-build.md and the session's own notes on the
-`disk` group vs. real `mount()` capability gap), and anything involving
-actual Pi hardware (nothing has booted a physical board yet).
+**The install step cannot run on an x86_64 workstation, at all.** This was
+chased for a while as if it were a podman flag problem; it isn't, and the
+reason is worth writing down so nobody retries it.
+
+`bootc install to-disk` re-execs itself into the host mount namespace --
+`exec_in_host_mountns()` in `crates/lib/src/install.rs` opens
+`/proc/1/ns/mnt` and calls `setns(fd, CLONE_NEWNS)`. Per `setns(2)`,
+`CLONE_NEWNS` requires the calling process to be **single-threaded**,
+because a multithreaded process shares filesystem attributes (`CLONE_FS`)
+with its threads; a multithreaded caller gets `EINVAL`. Every binary run
+under qemu-user binfmt emulation is multithreaded -- qemu starts its RCU
+call thread before the guest executes a single instruction. Measured
+directly, running the *same single-threaded* `grep` two ways:
+
+| container | `Threads:` in `/proc/self/status` |
+| --- | --- |
+| native amd64 | 1 |
+| emulated arm64 (qemu-user) | 2 |
+
+So an emulated `bootc install to-disk` fails every time with:
+
+```
+error: Installing to disk: Gathering source info from container env: ...
+error: Re-exec in host mountns: setns: Invalid argument (os error 22)
+```
+
+`--privileged`, `--pid=host` and `--cgroupns=host` were each tried; none
+of them change it, and nothing can. `--pid=host` in particular is not
+optional -- bootc checks for it explicitly and refuses to start without
+it -- so dropping it is not a workaround either. This is a kernel-level
+constraint, not a bootc bug.
+
+This matches what everyone else does. AlmaLinux's `bootc-images-rpi`
+builds only on the native `ubuntu-24.04-arm` runner and never emulates
+([build.yml](https://github.com/AlmaLinux/bootc-images-rpi/blob/main/.github/workflows/build.yml)),
+and every cross-arch path through `bootc-image-builder` is experimental
+and broken -- osbuild/bootc-image-builder#333 (`Exec format error`) was
+closed *not planned*, #639 and #1225 are unresolved, and that repo was
+archived in June 2026. A full `qemu-system-aarch64` VM would work but is
+TCG-only on an x86_64 host (KVM cannot accelerate a foreign
+architecture), so it is hours per build, not minutes.
+
+**Consequence: the build is split at that boundary.**
+`build-disk-image.sh` now refuses to start unless `uname -m` is aarch64,
+and prints the CI route rather than failing several minutes in. It does
+the truncate, the image-store transfer, and the install, then hands off
+to `provision-image.sh`. Everything in `provision-image.sh` -- firmware
+seeding, secrets injection, `rpi-bootc-bootloader sync`, in-place
+verification -- is loop-mounts and file copies with no such constraint,
+so it runs fine on x86_64 against a CI-built `.img`. That split is also
+what keeps `secrets.env` on the workstation, which is the only place it
+is allowed to be.
+
+The one podman step `provision-image.sh` still runs emulated is
+`rpi-bootc-bootloader sync`, and that is fine: the hook is a plain bash
+script, and the single binary it calls, `bootc status --format json`,
+touches no namespaces. Confirmed under emulation -- it returns
+`booted: null, staged: null`, which is exactly the fresh-install case the
+hook's single-deployment fallback already handles.
+
+**Not yet done:** anything involving actual Pi hardware (nothing has
+booted a physical board yet).
 
 Everything below this point predates the above and is kept for the
 reasoning and evidence it contains, not as a current status report --

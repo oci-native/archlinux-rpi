@@ -7,3 +7,8 @@
 /out/
 secrets.env
 *.secret
+
+# Downloaded CI disk-image artifacts, worked on locally. Never committed.
+.ci-artifact/
+*.img
+*.img.zst
