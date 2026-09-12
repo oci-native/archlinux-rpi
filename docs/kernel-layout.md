@@ -9,6 +9,25 @@ bootc's two hard requirements, restated: kernel at
 `/usr/lib/modules/$kver/vmlinuz`, initramfs at
 `/usr/lib/modules/$kver/initramfs.img`, and `/boot` empty in the built image.
 
+**2026-09-13: the kernel no longer comes from any Arch package.** `linux-rpi` never
+mounted root on the real board, so `Containerfile.base` now takes the kernel, modules
+and dtbs from `quay.io/almalinuxorg/almalinux-bootc-rpi:10` and installs no Arch kernel
+at all -- see the superseding note at the top of `docs/kernel-choice.md`. The *layout*
+this doc specifies is unchanged and is still what the sync hook reads: kernel,
+initramfs and `dtbs/` all under one `/usr/lib/modules/$kver/`. What changed is only
+where that directory's contents originate. Two knock-on details worth knowing:
+
+- The dtb set is staged in the `alma-kernel` build stage, from
+  `/usr/share/raspberrypi2-kernel4/$kver/boot/`, not relocated out of `/boot` in
+  `Containerfile.rpi`. It is the same 25-dtb Raspberry Pi downstream set inventoried
+  below, `bcm2712d0-rpi-5-b.dtb` and `bcm2712-d-rpi-5-b.dtb` included, plus 366
+  overlays.
+- The VideoCore blobs still come from ALARM's `raspberrypi-bootloader`, and the
+  CYW43455 wifi blobs from `firmware-raspberrypi`. Both are firmware for the hardware,
+  not for the kernel, and `firmware-raspberrypi` does ship
+  `brcmfmac43455-sdio.raspberrypi,5-model-b.{bin,txt,clm_blob}`, which is what the
+  AlmaLinux kernel's `brcmfmac` will ask for on this board.
+
 ## Package manifests
 
 ### linux-rpi 6.18.50-1 (aarch64, 2440 files, 50.9 MB installed)

@@ -1,5 +1,30 @@
 # Kernel choice for the Pi 5: ALARM's `linux-rpi`, verified
 
+## Superseded in practice, 2026-09-13: the image now ships AlmaLinux's kernel
+
+This doc's verdict was "use ALARM's `linux-rpi` as-is", and everything below still
+stands as a reading of that package. What it could not settle, because nothing in it
+had run on hardware, is whether that kernel boots this board in this image. It does
+not. Two flashed cards came back with zero journal files, `machine-id` still
+`uninitialized`, and an ext4 whose last mount was the build host -- root was never
+mounted, on either. The same board, reader and card boot
+`quay.io/almalinuxorg/almalinux-bootc-rpi:10` without trouble.
+
+So `Containerfile.base` now takes the kernel, its modules and its dtbs whole from that
+image (`6.12.96-20260724.v8.1.el10`, the AlmaLinux rebuild of the Raspberry Pi
+Foundation's downstream fork) and installs no Arch kernel package at all. The
+properties this doc cared about survive the swap: `CONFIG_ARM64_4K_PAGES=y`, so the
+16K-page ELF-alignment rejection in §2 still holds; no `CONFIG_MODULE_SIG_FORCE`, so
+Arch userspace loads the modules and dracut packs them; and it is the same upstream
+tree, just rebuilt by a different distro. Their `vmlinuz` is a gzip-compressed Image at
+9.5 MB against `linux-rpi`'s raw 24 MB `kernel8.img`, which is worth something on its
+own given the card reader here.
+
+Read the rest of this doc as what it is -- the case that `linux-rpi` is a well-maintained
+package, which is still true and is not the reason it was dropped. Going back to it is a
+matter of flashing a card built against it; the evidence below does not need redoing.
+
+
 Debian trixie was parked before `docs/debian-bootc.md` got written, so there is nothing
 to mark abandoned there. One line for the record: the reason Debian looked attractive
 was a weak-Pi5-kernel worry about Arch. That worry doesn't survive contact with evidence

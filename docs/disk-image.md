@@ -237,6 +237,42 @@ what actually tests the `os_prefix` firmware chain, the wifi profile and
 the networkd fix -- none of which any amount of offline verification can
 confirm.
 
+## It flashed, it verified, and it still did not boot -- so the kernel changed
+
+Two cards were flashed and booted after the above: the 25 GiB one, and a
+smaller one carrying the `force_drivers sdhci-of-dwcmshc` fix. Neither
+mounted root. Both came back with zero files under `/var/log/journal`,
+`machine-id` still `uninitialized`, not one file under `/var` newer than
+the pre-boot marker, and an ext4 whose `Last mounted on` still pointed at
+the build host. The firmware demonstrably got as far as reading
+`config.txt`, `rpi-config.txt` and `bcm2712-rpi-5-b.dtb` -- the firmware
+log shows those reads -- and then the screen went black, with no `Read
+... vmlinuz` line ever observed.
+
+Offline verification cannot reach past that point, and three rounds of
+it had already passed 22/22. So rather than keep bisecting our own
+kernel and initramfs against a known-good one, the image now ships the
+known-good one: `Containerfile.base` takes the kernel, modules and dtbs
+whole from `quay.io/almalinuxorg/almalinux-bootc-rpi:10`
+(`6.12.96-20260724.v8.1.el10`) and installs no Arch kernel package at
+all. Same board, same reader, same card boot that image unmodified.
+Details and what survives the swap: the superseding note at the top of
+`docs/kernel-choice.md`.
+
+Worth stating plainly because it is still unsettled: **the card or the
+reader may itself be the fault.** The reader is USB 2.0 and has dropped
+off the bus three separate times mid-write -- once during the 50 GB
+flash (`device offline error`), then twice on writes of a few tens of MB
+(`Buffer I/O error`, `FAT-fs: unable to read boot sector`, `JBD2:
+Aborting journal`, followed by re-enumeration). Size is not the trigger
+if it happens on a 27 MB write. A kernel image is roughly that size, so
+media that flakes on a read that big produces exactly the observed
+symptom: firmware reads the small files near the start of the partition,
+fails on the kernel, black screen, root never mounted. Trying a
+different card or reader is a five-minute test and it would settle
+whether any of the software bisecting was ever necessary. It has not
+been run.
+
 Everything below this point predates the above and is kept for the
 reasoning and evidence it contains, not as a current status report --
 the HANDOFF section in particular describes an earlier, unfinished state.

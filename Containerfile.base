@@ -1,11 +1,13 @@
 # aarch64 bootc base: kernel, dracut initramfs, ostree layout.
 #
 # Sibling of /home/bupd/Projects/archlinux/Containerfile.base, adapted per
-# docs/TEAM-BRIEF.md and STATUS.md. linux-rpi lives here (not in
+# docs/TEAM-BRIEF.md and STATUS.md. The kernel lives here (not in
 # Containerfile.rpi) since this repo's only aarch64 target is the Pi.
-# Everything specific to the Pi's firmware boot chain -- dtb relocation,
-# VideoCore blobs, the sync hook -- is Containerfile.rpi's job instead,
-# built FROM this image's tag.
+# Everything specific to the Pi's firmware boot chain -- VideoCore blobs,
+# the sync hook -- is Containerfile.rpi's job instead, built FROM this
+# image's tag.
+#
+# The kernel is AlmaLinux's, not Arch's. See the alma-kernel stage below.
 #
 # Depends on two images already built locally:
 #   localhost/bootc-aarch64-builder:v1.16.10   (Containerfile.bootc)
@@ -14,6 +16,56 @@
 #   podman build -f Containerfile.base -t localhost/archlinux-rpi-base:latest .
 
 FROM --platform=$BUILDPLATFORM localhost/bootc-aarch64-builder:v1.16.10 AS bootc-builder
+
+# The kernel, its modules and its device trees, taken whole from
+# AlmaLinux's Raspberry Pi bootc image rather than built from Arch's
+# linux-rpi.
+#
+# Not a preference -- Arch's kernel has never once mounted root on this
+# Pi 5. Two flashed cards came back with zero journal files, machine-id
+# still "uninitialized", and an ext4 whose last mount was the build host,
+# while this exact image (quay.io/almalinuxorg/almalinux-bootc-rpi:10)
+# boots the same board off the same reader and card. Rather than keep
+# bisecting our own kernel and initramfs against a known-good one, take
+# the known-good one.
+#
+# What this buys, concretely:
+#   - Their vmlinuz is a gzip-compressed Image (9.5 MB) where linux-rpi's
+#     kernel8.img is a raw 24 MB Image. On a card/reader that has dropped
+#     off the USB bus three times mid-write, a 2.5x smaller read before
+#     the kernel even starts is worth having on its own.
+#   - CONFIG_ARM64_4K_PAGES=y, so docs/kernel-choice.md's whole reason for
+#     picking linux-rpi over linux-rpi-16k still holds with this kernel.
+#   - No CONFIG_MODULE_SIG_FORCE, so Arch userspace can load these modules
+#     and dracut can pack them (they are .ko.xz; Arch's kmod is +XZ).
+#   - The dtbs are the ones this kernel was built against, which is why
+#     they get staged here, next to it, rather than coming from a
+#     separately-versioned Arch package.
+#
+# The overlays directory is copied wholesale rather than by *.dtbo glob,
+# because it holds two files the VideoCore firmware itself reads and the
+# glob silently dropped: overlay_map.dtb (overlay parameter mapping) and
+# hat_map.dtb (HAT auto-detection). The old dtb relocation in
+# Containerfile.rpi globbed, so both were missing from every image built
+# before 2026-09-13.
+#
+# initramfs.img is dropped: dracut rebuilds it further down, against this
+# image's ostree config. build/source are dangling symlinks into
+# /usr/src/kernels, which does not exist here.
+FROM --platform=linux/arm64 quay.io/almalinuxorg/almalinux-bootc-rpi:10 AS alma-kernel
+RUN set -eu; \
+    kver="$(ls /usr/lib/modules)"; \
+    test -s "/usr/lib/modules/${kver}/vmlinuz"; \
+    rm -f "/usr/lib/modules/${kver}/initramfs.img" \
+          "/usr/lib/modules/${kver}/build" \
+          "/usr/lib/modules/${kver}/source"; \
+    mkdir -p "/usr/lib/modules/${kver}/dtbs/overlays"; \
+    cp "/usr/share/raspberrypi2-kernel4/${kver}/boot"/*.dtb \
+       "/usr/lib/modules/${kver}/dtbs/"; \
+    cp -a "/usr/share/raspberrypi2-kernel4/${kver}/boot/overlays/." \
+       "/usr/lib/modules/${kver}/dtbs/overlays/"; \
+    test -s "/usr/lib/modules/${kver}/dtbs/bcm2712-rpi-5-b.dtb"; \
+    test -s "/usr/lib/modules/${kver}/dtbs/overlays/overlay_map.dtb"
 
 FROM --platform=linux/arm64 localhost/archlinux-arm-base:latest AS system
 
@@ -39,9 +91,10 @@ RUN grep "= */var" /etc/pacman.conf | \
 # cache was invalidated. Upgrading the whole rootfs in the same
 # transaction is the only version of this that keeps working unattended.
 #
-# linux-rpi, not linux-rpi-16k: 16K pages break ELF alignment assumptions
-# in QEMU/KVM/Wine/Box86/Chromium, and this box runs arbitrary aarch64
-# container images as a container host. See docs/kernel-choice.md.
+# No kernel package here -- the kernel comes from the alma-kernel stage
+# above, and installing linux-rpi as well would put a second version
+# directory under /usr/lib/modules, which every `kver="$(ls
+# /usr/lib/modules)"` in this repo assumes cannot happen.
 #
 # skopeo and bubblewrap aren't on Prasanth's explicit package list, but
 # both are real runtime deps, not extras: ostree-ext shells out to `skopeo
@@ -60,7 +113,6 @@ RUN --mount=type=tmpfs,dst=/tmp \
         dosfstools \
         e2fsprogs \
         glib2 \
-        linux-rpi \
         networkmanager \
         openssh \
         openssl \
@@ -76,13 +128,17 @@ COPY --from=bootc-builder /output /
 RUN chmod 4755 /usr/bin/newuidmap && \
     chmod 4755 /usr/bin/newgidmap
 
-# linux-rpi puts the real kernel at /boot/kernel8.img and a zero-byte
-# *placeholder* at /usr/lib/modules/$kver/vmlinuz -- the exact path
-# bootc/ostree read as "the kernel." Fix it now, before Containerfile.rpi
-# relocates the rest of /boot and empties it.
+# The kernel, modules and dtbs, in one layer, at the versioned path
+# bootc/ostree reads as "the kernel": /usr/lib/modules/$kver/vmlinuz.
+# Copied whole so the dtb set can never drift from the kernel it was
+# built against across an upgrade or rollback -- the same reason the dtbs
+# used to be relocated into this directory from Arch's /boot.
+COPY --from=alma-kernel /usr/lib/modules /usr/lib/modules
+
 RUN kver="$(ls /usr/lib/modules)" && \
-    test -s /boot/kernel8.img && \
-    install -m644 /boot/kernel8.img "/usr/lib/modules/${kver}/vmlinuz"
+    test -s "/usr/lib/modules/${kver}/vmlinuz" && \
+    test -s "/usr/lib/modules/${kver}/modules.dep" && \
+    test -s "/usr/lib/modules/${kver}/dtbs/bcm2712-rpi-5-b.dtb"
 
 # dracut CONFIG only. The initramfs itself is built much later, after
 # prepare-root.conf exists -- see the dracut run near the end of this file.
@@ -100,6 +156,10 @@ RUN kver="$(ls /usr/lib/modules)" && \
 #
 # This is also why every qemu test passed. `-M raspi4b` is a Pi 4, so it
 # took the builtin sdhci-iproc path and never exercised this at all.
+#
+# Still needed with the AlmaLinux kernel: it ships sdhci-of-dwcmshc as
+# .ko.xz too, and their own initramfs contains it. Same requirement, and
+# the assertion after the dracut run below checks it holds.
 #
 # `bootc` is deliberately NOT in add_dracutmodules. AlmaLinux's working
 # image ships the 51bootc module on disk but its check() returns 255 so it
@@ -218,13 +278,15 @@ RUN printf '%s\n' \
 RUN --mount=type=tmpfs,dst=/var/tmp \
     kernel_dir="$(find /usr/lib/modules -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)" && \
     test -n "$kernel_dir" && \
-    dracut --force "${kernel_dir}/initramfs.img" && \
-    lsinitrd "${kernel_dir}/initramfs.img" | grep -q 'ostree/prepare-root.conf'
+    dracut --force --kver "$(basename "$kernel_dir")" \
+        "${kernel_dir}/initramfs.img" && \
+    lsinitrd "${kernel_dir}/initramfs.img" | grep -q 'ostree/prepare-root.conf' && \
+    lsinitrd "${kernel_dir}/initramfs.img" | grep -q 'sdhci-of-dwcmshc'
 
 # Size trim. Every removal here was checked against `pacman -Qi <pkg>`
 # "Required By" plus readelf -d / strings on the actual linked binaries
 # before it went in -- see the report this RUN was written for. Nothing
-# on the MUST-NOT-REMOVE list (linux-rpi, ostree, skopeo, bubblewrap,
+# on the MUST-NOT-REMOVE list (ostree, skopeo, bubblewrap,
 # dracut, systemd, networkmanager, openssh, sudo, e2fsprogs, dosfstools,
 # glib2/openssl/zstd, podman) is touched.
 #
@@ -237,11 +299,13 @@ RUN --mount=type=tmpfs,dst=/var/tmp \
 # package set needs python or protobuf. Force-remove: pacman's dependency
 # graph is stale here, the ELF graph isn't.
 #
-# binutils / mkinitcpio / libmakepkg-dropins: linux-rpi hard-depends on
-# mkinitcpio for its kernel pacman hooks, but this image builds its
-# initramfs with dracut and never invokes mkinitcpio. binutils is pulled
-# in only as mkinitcpio/libmakepkg-dropins' own dependency; nothing that
-# actually runs on the deployed system links or shells out to it.
+# binutils / mkinitcpio / libmakepkg-dropins: mkinitcpio was linux-rpi's
+# hard dependency, for kernel pacman hooks this image never runs -- it
+# builds its initramfs with dracut. binutils came in only as
+# mkinitcpio/libmakepkg-dropins' own dependency; nothing that actually
+# runs on the deployed system links or shells out to it. Kept in the list
+# even though dropping linux-rpi should take the whole chain with it,
+# since pacman may still have them as explicit installs.
 #
 # gettext: no binary in this image links libintl.so -- there isn't one on
 # Arch, glibc supplies gettext() natively on Linux (confirmed with
@@ -251,11 +315,25 @@ RUN --mount=type=tmpfs,dst=/var/tmp \
 # dependents libxml2/icu are left alone: libarchive also depends on
 # libxml2 and is pacman's and podman's real archive backend, so that
 # chain is genuinely load-bearing.
+# Filtered through `pacman -Qq` because this list outlived the package
+# that pulled half of it in: mkinitcpio/binutils/libmakepkg-dropins were
+# only ever here as linux-rpi's dependency chain, and with the kernel now
+# coming from the alma-kernel stage they may not be installed at all.
+# `pacman -Rdd` fails the build on a target it cannot find.
 RUN --mount=type=tmpfs,dst=/tmp \
-    pacman -Rdd --noconfirm \
+    installed="" && \
+    for pkg in \
         criu python-protobuf protobuf abseil-cpp python \
         mkinitcpio libmakepkg-dropins binutils \
-        gettext
+        gettext; \
+    do \
+        if pacman -Qq "$pkg" >/dev/null 2>&1; then \
+            installed="$installed $pkg"; \
+        fi; \
+    done && \
+    if [ -n "$installed" ]; then \
+        pacman -Rdd --noconfirm $installed; \
+    fi
 
 # Headers, man/doc/info pages and static archives are compile-time or
 # documentation-time artifacts; nothing reads them at runtime, and pacman

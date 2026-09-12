@@ -1,10 +1,14 @@
 # Raspberry Pi 5 specifics: firmware, device trees, the sync hook.
 #
 # FROM the generic aarch64 bootc base (Containerfile.base). Everything here
-# is about the VideoCore firmware boot chain: relocating linux-rpi's device
-# trees and raspberrypi-bootloader's VideoCore blobs out of /boot (which
-# bootc requires empty), vendoring the sync hook that mirrors each ostree
+# is about the VideoCore firmware boot chain: relocating
+# raspberrypi-bootloader's VideoCore blobs out of /boot (which bootc
+# requires empty), vendoring the sync hook that mirrors each ostree
 # deployment onto the firmware partition, and emptying /boot for good.
+#
+# Device trees are no longer relocated here. They now arrive already
+# staged under /usr/lib/modules/$kver/dtbs from the alma-kernel stage in
+# Containerfile.base, alongside the kernel they were built against.
 #
 # Depends on:
 #   localhost/archlinux-rpi-base:latest   (Containerfile.base)
@@ -27,16 +31,15 @@ RUN --mount=type=tmpfs,dst=/tmp \
         raspberrypi-utils \
         wireless-regdb
 
-# Relocate dtbs/overlays out of /boot into the same versioned
-# /usr/lib/modules/$kver/ directory the kernel and initramfs already live
-# in, so the dtb set can never drift from the kernel it was built against
-# across an upgrade or rollback. This is the one line the vendored sync
+# dtbs/overlays already sit in the same versioned
+# /usr/lib/modules/$kver/ directory as the kernel and initramfs, so the
+# dtb set cannot drift from the kernel it was built against across an
+# upgrade or rollback. That layout is the one thing the vendored sync
 # hook (below) was patched for -- see its own header comment and
-# docs/port-spec.md part D.
+# docs/port-spec.md part D -- so assert it rather than assume it.
 RUN kver="$(ls /usr/lib/modules)" && \
-    mkdir -p "/usr/lib/modules/${kver}/dtbs/overlays" && \
-    cp /boot/*.dtb "/usr/lib/modules/${kver}/dtbs/" && \
-    cp /boot/overlays/*.dtbo "/usr/lib/modules/${kver}/dtbs/overlays/"
+    test -s "/usr/lib/modules/${kver}/dtbs/bcm2712-rpi-5-b.dtb" && \
+    test -d "/usr/lib/modules/${kver}/dtbs/overlays"
 
 # VideoCore blobs are a package-level artifact, not versioned with the
 # kernel -- the sync hook never reads this path, seed-firmware.sh does, at
@@ -58,15 +61,16 @@ RUN kver="$(ls /usr/lib/modules)" && \
 # root=, bootc/ostree supplies that from the BLS entry.
 #
 # No console= at all, deliberately, matching AlmaLinux's working image --
-# their cmdline.txt is just root=, rw, boot= and ostree=. Two earlier
-# attempts here were wrong: console=serial0,115200 alone sent every kernel
-# message to the UART and left HDMI black, and adding console=tty1 did not
-# help either, because this kernel builds DRM as a module and has no
-# simpledrm built in, so there is no framebuffer console at all until the
-# real root is mounted and modules load. HDMI silence during early boot is
-# therefore normal here and says nothing about whether the kernel is
-# running -- do not read it as a failure, and do not diagnose this board
-# over HDMI. Use ethernet or a UART adapter.
+# their cmdline.txt is just root=, rw, boot= and ostree=, and this image
+# now runs their kernel, so matching them is no longer an analogy. Two
+# earlier attempts here were wrong: console=serial0,115200 alone sent
+# every kernel message to the UART and left HDMI black, and adding
+# console=tty1 did not help either, because DRM is modular and there is
+# no simpledrm built in, so there is no framebuffer console at all until
+# the real root is mounted and modules load. HDMI silence during early
+# boot is therefore normal here and says nothing about whether the kernel
+# is running -- do not read it as a failure, and do not diagnose this
+# board over HDMI. Use ethernet or a UART adapter.
 RUN install -d /usr/lib/bootc/kargs.d && \
     printf '%s\n' \
         'kargs = ["rootwait"]' \
