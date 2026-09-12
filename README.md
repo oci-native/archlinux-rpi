@@ -56,3 +56,21 @@ Two Raspberry Pi 5 boards are being used for hardware verification.
 - [kfox1111/rpi-bootc-bootloader](https://github.com/kfox1111/rpi-bootc-bootloader) is
   the sync hook that makes it work. We vendor a patched copy rather than fetching it at
   build time.
+
+## Pivoting to NixOS
+
+The Arch-based images under `Containerfile.*` are being superseded by NixOS
+images built from `nix/`. The boot mechanism is unchanged: native Pi firmware,
+bootc with the ostree backend, composefs on, no UEFI and no U-Boot.
+
+Findings and the rationale are in `docs/nixos-pivot.md`. Notably, it records
+that every Arch image built so far forced the wrong SD host controller driver
+into its initramfs.
+
+There is no Nix on the build host and none is required. `nix/nixrun.sh` runs
+everything inside `docker.io/nixos/nix` with the store in a podman volume, and
+aarch64 derivations build through the host's binfmt registration.
+
+    ./nix/mksecrets.sh                       # secrets.env -> nix/secrets.nix
+    ./nix/nixrun.sh nix build --impure \
+        ./nix#nixosConfigurations.sd.config.system.build.sdImage

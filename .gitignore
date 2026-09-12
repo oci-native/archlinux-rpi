@@ -12,3 +12,7 @@ secrets.env
 .ci-artifact/
 *.img
 *.img.zst
+
+# Generated from secrets.env. Never committed.
+nix/secrets.nix
+nix/out/
