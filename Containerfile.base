@@ -143,6 +143,16 @@ RUN kver="$(ls /usr/lib/modules)" && \
 # dracut CONFIG only. The initramfs itself is built much later, after
 # prepare-root.conf exists -- see the dracut run near the end of this file.
 #
+# CORRECTION, 2026-09-13: this driver is wrong. See docs/nixos-pivot.md.
+# The Pi 5's SD slot is sdio1 / mmc@fff000, compatible "brcm,bcm2712-sdhci",
+# which drivers/mmc/host/sdhci-brcmstb.c claims -- module sdhci-brcmstb, and
+# it is built in, not a module, because CONFIG_ARCH_BRCMSTB=y makes
+# CONFIG_MMC_SDHCI_BRCMSTB default to y and savedefconfig then omits the line.
+# raspberrypi,rp1-dwcmshc is RP1's own controller and is status = "disabled"
+# on a Pi 5 B. The assertion below passed on every build and was checking for
+# the wrong string. Left in place only because this file is being superseded
+# by the NixOS images under nix/; do not copy this reasoning forward.
+#
 # force_drivers sdhci-of-dwcmshc is what lets a Pi 5 find its root disk.
 # The Pi 5's SD node is compatible = "raspberrypi,rp1-dwcmshc", driven by
 # sdhci-of-dwcmshc, and this kernel builds that as a MODULE -- whereas the
