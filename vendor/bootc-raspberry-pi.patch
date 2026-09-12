@@ -1,7 +1,7 @@
 From 30f4c819ba33fc0da6a9189541710bbe0e407169 Mon Sep 17 00:00:00 2001
 From: Prasanth Baskar <prasanth@8gears.com>
 Date: Sun, 13 Sep 2026 03:37:28 +0530
-Subject: [PATCH 1/2] install: Add a raspberry-pi bootloader backend
+Subject: [PATCH 1/3] install: Add a raspberry-pi bootloader backend
 
 The VideoCore firmware in a Raspberry Pi's SPI EEPROM reads config.txt off
 the FAT partition and loads the kernel, initramfs and device tree itself.
@@ -546,7 +546,7 @@ index 15ad101..37953bf 100644
 From 092d5c4ad0784c07549896f169743851c92f35e9 Mon Sep 17 00:00:00 2001
 From: Prasanth Baskar <prasanth@8gears.com>
 Date: Sun, 13 Sep 2026 03:38:48 +0530
-Subject: [PATCH 2/2] fixup: Use run_capture_stderr and cover the new match arm
+Subject: [PATCH 2/3] fixup: Use run_capture_stderr and cover the new match arm
 
 CommandRunExt has no bare run(); the umount uses run_capture_stderr. The
 Bootloader match in the composefs status path became non-exhaustive, so it
@@ -589,6 +589,45 @@ index 31ac8e4..9145f6b 100644
          tracing::warn!("Failed to unmount {fw}: {e}");
      }
      result
+-- 
+2.55.0
+
+
+From 71ed1476015c7db207b436bf09435b0573b53a57 Mon Sep 17 00:00:00 2001
+From: Prasanth Baskar <prasanth@8gears.com>
+Date: Sun, 13 Sep 2026 03:55:35 +0530
+Subject: [PATCH 3/3] fixup: Mount the firmware partition at <root>/boot/efi
+
+The baseline installer runs mkfs.fat on the ESP and creates <boot>/efi, but
+never mounts it, so the backend has to. Doing it inside the target tree rather
+than under /run matches the bootupd path and leaves the firmware partition
+visible to anything inspecting the target afterwards.
+
+Signed-off-by: Prasanth Baskar <prasanth@8gears.com>
+---
+ crates/lib/src/bootloader.rs | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/crates/lib/src/bootloader.rs b/crates/lib/src/bootloader.rs
+index 9145f6b..63c4c75 100644
+--- a/crates/lib/src/bootloader.rs
++++ b/crates/lib/src/bootloader.rs
+@@ -806,9 +806,12 @@ pub(crate) fn install_via_raspberrypi(
+     })?;
+     let esp_path = esp.path();
+ 
+-    // Mounted somewhere of our own rather than relying on /boot/efi, so this
+-    // behaves identically at install time and when re-syncing later.
+-    let fw = Utf8PathBuf::from("/run/bootc/rpi-firmware");
++    // The baseline installer runs mkfs.fat on the ESP and creates <boot>/efi,
++    // but does not mount it, so mount it here. Keeping it inside the target
++    // tree rather than somewhere under /run matches what the bootupd path
++    // does and means the firmware partition is visible to anything that looks
++    // at the target afterwards.
++    let fw = root_path.join("boot").join(EFI_DIR);
+     create_dir_all(fw.as_std_path()).with_context(|| format!("Creating {fw}"))?;
+     mount::mount(&esp_path, &fw)?;
+ 
 -- 
 2.55.0
 
