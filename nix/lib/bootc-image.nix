@@ -42,6 +42,17 @@ let
     kargs = ["rootwait", "init=${toplevel}/init"]
   '';
 
+  # /var starts empty, so the toplevel symlinks into it need their targets
+  # created on first boot.
+  baseDirsTmpfiles = pkgs.writeText "bootc-base-dirs.conf" ''
+    d /var/home     0755 root root -
+    d /var/roothome 0700 root root -
+    d /var/srv      0755 root root -
+    d /var/opt      0755 root root -
+    d /var/mnt      0755 root root -
+    d /var/usrlocal 0755 root root -
+  '';
+
   # A config.txt fragment lifecycled with this deployment. bootc's
   # raspberry-pi backend copies it into the slot directory and config.txt
   # includes it, so per-image firmware settings travel with the image rather
@@ -122,20 +133,13 @@ let
     ln -s ${pkgs.coreutils}/bin/env      $out/usr/bin/env
 
     # ostree deploys /etc by three-way merge, and NixOS regenerates it at
-    # activation, so machine-id must not be baked in.
-    install -Dm0444 /dev/null $out/etc/machine-id
+    # activation, so a real machine-id must not be baked in.
+    mkdir -p $out/etc
     echo uninitialized > $out/etc/machine-id
+    chmod 0644 $out/etc/machine-id
 
-    # The toplevel dirs that the symlinks above point at have to be created on
-    # first boot, since /var starts empty.
-    install -Dm0644 /dev/stdin $out/usr/lib/tmpfiles.d/bootc-base-dirs.conf <<'EOF'
-    d /var/home     0755 root root -
-    d /var/roothome 0700 root root -
-    d /var/srv      0755 root root -
-    d /var/opt      0755 root root -
-    d /var/mnt      0755 root root -
-    d /var/usrlocal 0755 root root -
-    EOF
+    install -Dm0644 ${baseDirsTmpfiles} \
+      $out/usr/lib/tmpfiles.d/bootc-base-dirs.conf
 
     # A reference to the closure, so the store paths it needs end up in the
     # image. Also how anything on the running system finds the deployment.
