@@ -86,6 +86,27 @@
       packages.${system} = {
         sd-image = self.nixosConfigurations.sd.config.system.build.sdImage;
         toplevel = self.nixosConfigurations.sd.config.system.build.toplevel;
+
+        # A script that streams the bootc-installable OCI image to stdout.
+        # Pipe it into `podman load`.
+        bootc-image =
+          let
+            cfg = self.nixosConfigurations.bootc;
+            pkgs = cfg.pkgs;
+          in
+          import ./lib/bootc-image.nix {
+            inherit pkgs;
+            inherit (pkgs) lib;
+            config = cfg.config;
+            # Overridden in CI with the patched binary that knows
+            # --bootloader raspberry-pi.
+            bootcPackage =
+              if builtins.pathExists ./bootc-bin
+              then pkgs.runCommand "bootc-patched" { } ''
+                install -Dm0755 ${./bootc-bin}/bootc $out/bin/bootc
+              ''
+              else pkgs.bootc;
+          };
       };
     };
 }

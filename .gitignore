@@ -18,3 +18,4 @@ nix/secrets.nix
 nix/out/
 result
 nix/out/
+nix/bootc-bin/

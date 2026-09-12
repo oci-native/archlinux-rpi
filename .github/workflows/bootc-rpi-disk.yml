@@ -1,0 +1,137 @@
+# Build the NixOS bootc image and install it to a disk image, natively on arm64.
+#
+# Both halves have to happen on aarch64 hardware, for different reasons:
+#
+#   * The Pi 5 vendor kernel is a 16K-page build, so jemalloc and much of the
+#     package set are rebuilt from source and are not in any binary cache.
+#     Emulating that is hours.
+#   * `bootc install to-disk` runs from inside the target image and calls
+#     setns(/proc/1/ns/mnt, CLONE_NEWNS), which the kernel refuses from any
+#     multithreaded process. qemu-user always carries an extra RCU thread, so
+#     the install can never work under binfmt emulation, at any speed.
+name: bootc raspberry-pi disk image
+
+on:
+  workflow_dispatch:
+    inputs:
+      binary_run_id:
+        description: "Run ID of 'bootc raspberry-pi binary' to take the patched bootc from. Empty means the latest successful one."
+        default: ""
+      size:
+        description: "Disk image size"
+        default: "8G"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the patched bootc binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          run_id="${{ inputs.binary_run_id }}"
+          if [ -z "$run_id" ]; then
+            run_id=$(gh run list --workflow=bootc-rpi-binary.yml \
+                       --status=success --limit 1 --json databaseId \
+                       --jq '.[0].databaseId')
+          fi
+          echo "Using binary from run $run_id"
+          mkdir -p nix/bootc-bin
+          gh run download "$run_id" -n bootc-aarch64-raspberry-pi -D nix/bootc-bin
+          chmod +x nix/bootc-bin/bootc
+          ./nix/bootc-bin/bootc --version
+          # Prove this is the patched build before spending an hour on it.
+          ./nix/bootc-bin/bootc install to-disk --help 2>&1 | grep -q raspberry-pi
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            extra-substituters = https://nixos-raspberrypi.cachix.org
+            extra-trusted-public-keys = nixos-raspberrypi.cachix.org-1:4iMO9LXa8BqhU+Rpg6LQKiGa2lsNh/j2oiYLNOQ5sPI=
+
+      - name: Build the bootc container image
+        run: |
+          set -euxo pipefail
+          # No secrets.env in CI; the flake falls back to placeholder values.
+          nix build --accept-flake-config -L \
+            ./nix#packages.aarch64-linux.bootc-image \
+            --out-link bootc-image
+          ./bootc-image | sudo podman load
+          sudo podman images
+
+      - name: Lint the image the way bootc will see it
+        run: |
+          set -euxo pipefail
+          sudo podman run --rm localhost/nixos-rpi-bootc:latest \
+            bootc container lint --no-truncate || true
+          # Assert the things that decide whether it can boot at all.
+          sudo podman run --rm localhost/nixos-rpi-bootc:latest sh -c '
+            set -eux
+            test -d /nix/store
+            kver=$(ls /usr/lib/modules)
+            test -s "/usr/lib/modules/$kver/vmlinuz"
+            test -s "/usr/lib/modules/$kver/initramfs.img"
+            test -s "/usr/lib/modules/$kver/dtbs/bcm2712-rpi-5-b.dtb"
+            test -s "/usr/lib/modules/$kver/dtbs/overlays/overlay_map.dtb"
+            test -s "/usr/lib/modules/$kver/dtbs/overlays/README"
+            test -s /usr/lib/ostree/prepare-root.conf
+            test -s /usr/lib/bootc/kargs.d/10-rpi.toml
+            test -s /usr/lib/os-release
+            test -L /var/run
+            test -L /ostree
+          '
+
+      - name: Install to a disk image
+        run: |
+          set -euxo pipefail
+          truncate -s "${{ inputs.size }}" rpi-bootc.img
+          sudo podman run --rm --privileged --pid=host \
+            -v /dev:/dev -v /var/lib/containers:/var/lib/containers \
+            -v "$PWD:/target" \
+            --security-opt label=type:unconfined_t \
+            localhost/nixos-rpi-bootc:latest \
+            bootc install to-disk \
+              --via-loopback /target/rpi-bootc.img \
+              --filesystem ext4 \
+              --bootloader raspberry-pi \
+              --wipe --skip-fetch-check
+          sudo chown "$(id -u):$(id -g)" rpi-bootc.img
+          ls -l rpi-bootc.img
+
+      - name: Show what landed on the firmware partition
+        run: |
+          set -euxo pipefail
+          sudo sfdisk -d rpi-bootc.img
+          loop=$(sudo losetup --find --show --partscan --read-only rpi-bootc.img)
+          mkdir -p fw
+          sudo mount -o ro "${loop}p1" fw
+          find fw -maxdepth 3 | sort | head -60
+          echo "--- config.txt ---";               sudo cat fw/config.txt
+          echo "--- config-bootc-default.txt ---"; sudo cat fw/config-bootc-default.txt
+          echo "--- tryboot.txt ---";              sudo cat fw/tryboot.txt
+          echo "--- cmdline.txt ---";              sudo cat fw/bootc/entries/ostree-1/cmdline.txt
+          sudo umount fw
+          sudo losetup -d "$loop"
+
+      - name: Compress
+        run: |
+          set -euxo pipefail
+          zstd -T0 -3 --sparse rpi-bootc.img -o rpi-bootc.img.zst
+          sha256sum rpi-bootc.img.zst | tee rpi-bootc.img.zst.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpi-bootc-disk-image
+          path: |
+            rpi-bootc.img.zst
+            rpi-bootc.img.zst.sha256
+          if-no-files-found: error
