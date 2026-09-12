@@ -1,22 +1,35 @@
 {
-  description = "NixOS for the Raspberry Pi 5, booted by the Pi firmware directly";
+  description = "NixOS for the Raspberry Pi 5, booted the way NixOS boots a Raspberry Pi 5";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    nixos-hardware.url = "github:NixOS/nixos-hardware";
+    # nixos-raspberrypi is the project that implements the native Pi firmware
+    # boot path for NixOS: the vendor kernel from the raspberrypi/linux fork
+    # built with bcm2712_defconfig, matched firmware and wireless blobs, and
+    # per-generation kernel/initrd/cmdline under os_prefix on the FAT
+    # partition. It also publishes a binary cache, so the vendor kernel and
+    # the 16K-page package set are downloads rather than an overnight
+    # emulated build.
+    #
+    # This replaces an earlier attempt that used mainline linuxPackages_latest
+    # to avoid building a kernel. The Pi 5 loaded that kernel and never
+    # reached userspace.
+    nixos-raspberrypi.url = "github:nvmd/nixos-raspberrypi/main";
   };
 
-  outputs = { self, nixpkgs, nixos-hardware }:
+  nixConfig = {
+    extra-substituters = [ "https://nixos-raspberrypi.cachix.org" ];
+    extra-trusted-public-keys = [
+      "nixos-raspberrypi.cachix.org-1:4iMO9LXa8BqhU+Rpg6LQKiGa2lsNh/j2oiYLNOQ5sPI="
+    ];
+  };
+
+  outputs = { self, nixos-raspberrypi }:
     let
       system = "aarch64-linux";
-      # The host running this build is x86_64. aarch64 derivations go through
-      # the host's binfmt_misc registration, which carries the F (fix-binary)
-      # flag and therefore resolves inside nix's build sandbox as well.
-      pkgs = nixpkgs.legacyPackages.${system};
 
       # Host-specific values live outside git. secrets.nix is generated from
       # secrets.env by nix/mksecrets.sh and is gitignored; the fallback keeps
-      # the flake evaluable in CI, where no secrets exist.
+      # the flake evaluable where no secrets exist, such as in CI.
       secrets =
         if builtins.pathExists ./secrets.nix
         then import ./secrets.nix
@@ -27,22 +40,29 @@
           wifiSsid = "";
           wifiPsk = "";
         };
-
-      common = [
-        nixos-hardware.nixosModules.raspberry-pi-5
-        ./modules/rpi5-firmware-boot.nix
-        ./modules/base.nix
-        { _module.args.secrets = secrets; }
-      ];
     in
     {
-      nixosConfigurations = {
-        # A plain SD-card image. No bootc, no ostree -- this is the control
-        # experiment that proves the kernel, firmware and card all work.
-        sd = nixpkgs.lib.nixosSystem {
-          inherit system;
-          modules = common ++ [ ./modules/sd-image.nix ];
-        };
+      # lib.nixosSystem is nixos-raspberrypi's drop-in replacement for
+      # nixpkgs.lib.nixosSystem. It carries the overlay that provides
+      # linux_rpi5 and the matched raspberrypifw, and it trusts their cache.
+      nixosConfigurations.sd = nixos-raspberrypi.lib.nixosSystem {
+        specialArgs = { inherit nixos-raspberrypi; };
+        modules = [
+          {
+            imports = with nixos-raspberrypi.nixosModules; [
+              raspberry-pi-5.base
+              # The vendor kernel is built from bcm2712_defconfig, which sets
+              # CONFIG_ARM64_16K_PAGES. jemalloc compiled for 4K pages aborts
+              # at runtime, so the package set has to be rebuilt to match.
+              # This is the same pair of modules their own rpi5 installer
+              # image uses, which is why it is all in the cache.
+              raspberry-pi-5.page-size-16k
+              sd-image
+            ];
+          }
+          ./modules/base.nix
+          { _module.args.secrets = secrets; }
+        ];
       };
 
       packages.${system} = {

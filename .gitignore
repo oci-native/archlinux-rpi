@@ -16,3 +16,5 @@ secrets.env
 # Generated from secrets.env. Never committed.
 nix/secrets.nix
 nix/out/
+result
+nix/out/

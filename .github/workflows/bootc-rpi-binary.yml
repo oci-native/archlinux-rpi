@@ -1,0 +1,104 @@
+# Build bootc with the raspberry-pi bootloader backend, natively on arm64.
+#
+# The patch in vendor/ adds a `raspberry-pi` value to bootc's --bootloader
+# flag, which translates ostree's BLS entries into the os_prefix layout the
+# VideoCore firmware reads, and sizes the ESP at 1GiB so two deployments'
+# worth of kernel, initramfs, device trees and overlays fit.
+#
+# This runs on an arm64 runner because cross-compiling Rust with bootc's C
+# dependencies is fiddly and emulating the build is hours.
+name: bootc raspberry-pi binary
+
+on:
+  workflow_dispatch:
+    inputs:
+      registry_tag:
+        description: "Ephemeral registry tag to push the binary image to"
+        default: "ttl.sh/bupd-bootc-rpi:2h"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          # bootc links ostree, glib, openssl, libselinux, zstd and the
+          # util-linux libraries; selinux-sys runs bindgen, which needs libclang.
+          sudo apt-get install -y --no-install-recommends \
+              pkg-config clang libclang-dev \
+              libostree-dev libselinux1-dev libssl-dev libzstd-dev \
+              libglib2.0-dev libsystemd-dev libcap-dev \
+              libmount-dev libblkid-dev libcryptsetup-dev
+
+      - name: Clone bootc at the pinned base commit
+        run: |
+          set -euxo pipefail
+          base="$(cat vendor/bootc-base-commit.txt)"
+          git init bootc
+          cd bootc
+          git remote add origin https://github.com/bootc-dev/bootc.git
+          git fetch --depth 1 origin "$base"
+          git checkout FETCH_HEAD
+          git log --oneline -1
+
+      - name: Apply the raspberry-pi backend patch
+        run: |
+          set -euxo pipefail
+          cd bootc
+          git apply --stat ../vendor/bootc-raspberry-pi.patch
+          git apply ../vendor/bootc-raspberry-pi.patch
+          grep -q "RaspberryPi" crates/lib/src/spec.rs
+          grep -q "install_via_raspberrypi" crates/lib/src/bootloader.rs
+
+      - name: Build
+        run: |
+          set -euxo pipefail
+          cd bootc
+          cargo build --release -p bootc
+          ls -l target/release/bootc
+          file target/release/bootc
+
+      - name: Verify the new bootloader value is accepted
+        run: |
+          set -euxo pipefail
+          cd bootc
+          # --help lists the accepted --bootloader values, so this proves the
+          # clap ValueEnum picked up the variant without needing root.
+          ./target/release/bootc install to-disk --help 2>&1 | tee help.txt
+          grep -q "raspberry-pi" help.txt
+
+      - name: Strip and stage
+        run: |
+          set -euxo pipefail
+          mkdir -p out
+          cp bootc/target/release/bootc out/bootc
+          strip --strip-unneeded out/bootc || true
+          sha256sum out/bootc | tee out/bootc.sha256
+          ls -l out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bootc-aarch64-raspberry-pi
+          path: out/
+          if-no-files-found: error
+
+      # ttl.sh is anonymous and ephemeral, so no credentials are needed and
+      # nothing lingers. The image is only a carrier for the binary.
+      - name: Push the binary to an ephemeral registry
+        run: |
+          set -euxo pipefail
+          tag="${{ inputs.registry_tag }}"
+          ctr=$(buildah from scratch)
+          buildah copy "$ctr" out/bootc /usr/bin/bootc
+          buildah config --label org.opencontainers.image.description \
+              "bootc with the raspberry-pi bootloader backend, aarch64" "$ctr"
+          img=$(buildah commit "$ctr" bootc-rpi)
+          buildah push "$img" "docker://$tag"
+          echo "pushed $tag"

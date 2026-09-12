@@ -1,0 +1,594 @@
+From 30f4c819ba33fc0da6a9189541710bbe0e407169 Mon Sep 17 00:00:00 2001
+From: Prasanth Baskar <prasanth@8gears.com>
+Date: Sun, 13 Sep 2026 03:37:28 +0530
+Subject: [PATCH 1/2] install: Add a raspberry-pi bootloader backend
+
+The VideoCore firmware in a Raspberry Pi's SPI EEPROM reads config.txt off
+the FAT partition and loads the kernel, initramfs and device tree itself.
+There is no second-stage bootloader to install, so today the only way to
+install bootc on a Pi is --bootloader none plus an out-of-tree hook that
+translates ostree's BLS entries into something the firmware can read.
+AlmaLinux ships such a hook as shell, vendored from kfox1111/rpi-bootc-bootloader.
+
+This adds that translation as a bootloader backend, alongside bootupd,
+systemd-boot and zipl.
+
+For each /boot/loader/entries/ostree-N.conf, install_via_raspberrypi writes
+bootc/entries/ostree-N/ on the firmware partition containing vmlinuz, initrd,
+cmdline.txt (the BLS options line verbatim, which carries ostree=), and the
+device trees and overlays from that deployment. config.txt then selects a slot
+with os_prefix, and tryboot.txt names the other one, so the firmware's one-shot
+tryboot flag provides rollback with no bootloader involved.
+
+Three details are easy to get wrong and are handled explicitly:
+
+The overlays directory is copied wholesale rather than by a *.dtbo glob.
+overlay_map.dtb and hat_map.dtb are read by the firmware itself and are not
+overlays, so a glob drops them. The firmware also only honours os_prefix for
+overlays when ${os_prefix}${overlay_prefix}README exists, so that file has to
+survive or every deployment silently shares one set of overlays; its absence
+is warned about.
+
+Naming the kernel vmlinuz explicitly bypasses the firmware's
+kernel_2712.img / kernel8.img filename selection, so one name works across
+models.
+
+The ESP is sized 1GiB rather than 512MiB. It holds two deployments' worth of
+kernel, initramfs, every bcm*.dtb and several hundred overlays, which does not
+fit in 512MiB. This mirrors the existing larger-ESP path used by the composefs
+backend.
+
+BLS entries are parsed with bootc's own parse_bls_config rather than by hand,
+and the kernel version comes from kernel::find_kernel rather than from taking
+the first directory under /usr/lib/modules.
+
+Signed-off-by: Prasanth Baskar <prasanth@8gears.com>
+---
+ crates/lib/src/bootloader.rs       | 373 ++++++++++++++++++++++++++++-
+ crates/lib/src/install.rs          |  12 +
+ crates/lib/src/install/baseline.rs |  12 +
+ crates/lib/src/spec.rs             |  16 ++
+ 4 files changed, 412 insertions(+), 1 deletion(-)
+
+diff --git a/crates/lib/src/bootloader.rs b/crates/lib/src/bootloader.rs
+index 0a2836f..31ac8e4 100644
+--- a/crates/lib/src/bootloader.rs
++++ b/crates/lib/src/bootloader.rs
+@@ -4,7 +4,7 @@ use std::sync::OnceLock;
+ 
+ use anyhow::{Context, Result, anyhow, bail};
+ use bootc_utils::{BindMode, ChrootCmd, CommandRunExt};
+-use camino::Utf8Path;
++use camino::{Utf8Path, Utf8PathBuf};
+ use cap_std_ext::cap_std::fs::Dir;
+ use cap_std_ext::dirext::CapStdExtDirExt;
+ use fn_error_context::context;
+@@ -486,3 +486,374 @@ mod tests {
+         }
+     }
+ }
++
++/// Subdirectory on the Raspberry Pi firmware partition holding one directory
++/// per ostree boot entry. `os_prefix` in config.txt points at one of these.
++const RPI_ENTRIES_DIR: &str = "bootc/entries";
++
++/// Copy a file, writing to a temporary name and renaming into place.
++///
++/// The firmware partition is FAT, which gives no atomicity guarantees beyond
++/// rename, and it is usually an SD card, so it is worth not rewriting files
++/// whose contents already match.
++fn rpi_install_file(src: &Utf8Path, dest: &Utf8Path) -> Result<()> {
++    let contents =
++        std::fs::read(src).with_context(|| format!("Reading {src}"))?;
++    if let Ok(existing) = std::fs::read(dest) {
++        if existing == contents {
++            tracing::trace!("Unchanged: {dest}");
++            return Ok(());
++        }
++    }
++    let tmp = Utf8PathBuf::from(format!("{dest}.tmp"));
++    std::fs::write(&tmp, &contents).with_context(|| format!("Writing {tmp}"))?;
++    std::fs::rename(&tmp, dest).with_context(|| format!("Renaming {tmp} to {dest}"))?;
++    Ok(())
++}
++
++/// Write `contents` to `dest` via a temporary file, skipping unchanged files.
++fn rpi_write_file(dest: &Utf8Path, contents: &str) -> Result<()> {
++    if let Ok(existing) = std::fs::read_to_string(dest) {
++        if existing == contents {
++            return Ok(());
++        }
++    }
++    let tmp = Utf8PathBuf::from(format!("{dest}.tmp"));
++    std::fs::write(&tmp, contents).with_context(|| format!("Writing {tmp}"))?;
++    std::fs::rename(&tmp, dest).with_context(|| format!("Renaming {tmp} to {dest}"))?;
++    Ok(())
++}
++
++/// Copy every regular file directly inside `src` matching `ext` into `dest`.
++fn rpi_copy_files_with_extension(src: &Utf8Path, dest: &Utf8Path, ext: &str) -> Result<usize> {
++    let mut n = 0;
++    for entry in std::fs::read_dir(src.as_std_path())
++        .with_context(|| format!("Reading directory {src}"))?
++    {
++        let entry = entry?;
++        if !entry.file_type()?.is_file() {
++            continue;
++        }
++        let name = entry.file_name();
++        let Some(name) = name.to_str() else { continue };
++        if !name.ends_with(ext) {
++            continue;
++        }
++        rpi_install_file(&src.join(name), &dest.join(name))?;
++        n += 1;
++    }
++    Ok(n)
++}
++
++/// Stage the device trees and overlays for one deployment into its slot
++/// directory.
++///
++/// The overlays directory is copied wholesale rather than by a `*.dtbo` glob.
++/// `overlay_map.dtb` and `hat_map.dtb` are read by the VideoCore firmware
++/// itself and are not overlays, so a glob silently drops them. The firmware
++/// also only honours `os_prefix` for overlays when
++/// `${os_prefix}${overlay_prefix}README` exists, so that file has to survive
++/// too, otherwise overlays are silently shared between slots.
++fn rpi_stage_device_trees(dtbs: &Utf8Path, dest: &Utf8Path) -> Result<()> {
++    let n = rpi_copy_files_with_extension(dtbs, dest, ".dtb")?;
++    tracing::debug!("Staged {n} device trees from {dtbs}");
++
++    let overlays_src = dtbs.join("overlays");
++    if !overlays_src.exists() {
++        tracing::warn!("No overlays directory at {overlays_src}");
++        return Ok(());
++    }
++    let overlays_dest = dest.join("overlays");
++    create_dir_all(overlays_dest.as_std_path())
++        .with_context(|| format!("Creating {overlays_dest}"))?;
++    let mut n = 0;
++    for entry in std::fs::read_dir(overlays_src.as_std_path())
++        .with_context(|| format!("Reading directory {overlays_src}"))?
++    {
++        let entry = entry?;
++        if !entry.file_type()?.is_file() {
++            continue;
++        }
++        let name = entry.file_name();
++        let Some(name) = name.to_str() else { continue };
++        rpi_install_file(&overlays_src.join(name), &overlays_dest.join(name))?;
++        n += 1;
++    }
++    tracing::debug!("Staged {n} overlay files from {overlays_src}");
++    if !overlays_dest.join("README").exists() {
++        tracing::warn!(
++            "No README in {overlays_dest}; the firmware will ignore os_prefix for overlays and share them between deployments"
++        );
++    }
++    Ok(())
++}
++
++/// One ostree boot entry, as the Raspberry Pi firmware needs to see it.
++struct RpiSlot {
++    /// Entry name, e.g. `ostree-1`. This is also the slot directory name.
++    name: String,
++    /// Index parsed out of the name; ostree numbers its default entry 1.
++    index: u32,
++    /// Absolute host path to the kernel named by the BLS `linux` key.
++    linux: Utf8PathBuf,
++    /// Absolute host path to the initramfs named by the BLS `initrd` key.
++    initrd: Utf8PathBuf,
++    /// The BLS `options` line, which becomes cmdline.txt verbatim.
++    options: String,
++}
++
++/// Read the ostree BLS entries under `<root>/boot/loader/entries`.
++fn rpi_read_slots(root_path: &Utf8Path) -> Result<Vec<RpiSlot>> {
++    let entries_dir = root_path.join("boot/loader/entries");
++    let mut slots = Vec::new();
++    for entry in std::fs::read_dir(entries_dir.as_std_path())
++        .with_context(|| format!("Reading {entries_dir}"))?
++    {
++        let entry = entry?;
++        let name = entry.file_name();
++        let Some(name) = name.to_str() else { continue };
++        let Some(stem) = name.strip_suffix(".conf") else {
++            continue;
++        };
++        let Some(index) = stem.strip_prefix("ostree-") else {
++            continue;
++        };
++        let Ok(index) = index.parse::<u32>() else {
++            continue;
++        };
++        let path = entries_dir.join(name);
++        let contents =
++            std::fs::read_to_string(path.as_std_path()).with_context(|| format!("Reading {path}"))?;
++        let config = crate::parsers::bls_config::parse_bls_config(&contents)
++            .with_context(|| format!("Parsing {path}"))?;
++        let crate::parsers::bls_config::BLSConfigType::NonEFI {
++            linux,
++            initrd,
++            options,
++        } = &config.cfg_type
++        else {
++            bail!("{path} is not a kernel/initramfs boot entry; the Raspberry Pi firmware cannot boot a UKI");
++        };
++        let initrd = initrd
++            .first()
++            .ok_or_else(|| anyhow!("{path} has no initrd"))?;
++        // BLS paths are absolute with respect to the filesystem holding /boot,
++        // and already include the leading /boot component.
++        let strip = |p: &Utf8Path| root_path.join(p.as_str().trim_start_matches('/'));
++        slots.push(RpiSlot {
++            name: stem.to_owned(),
++            index,
++            linux: strip(linux),
++            initrd: strip(initrd),
++            options: options
++                .as_deref()
++                .map(|o| o.to_string())
++                .unwrap_or_default(),
++        });
++    }
++    if slots.is_empty() {
++        bail!("No ostree boot entries found in {entries_dir}");
++    }
++    // ostree numbers the default deployment 1 and the rollback 2.
++    slots.sort_by_key(|s| s.index);
++    Ok(slots)
++}
++
++/// Populate one slot directory on the firmware partition.
++fn rpi_stage_slot(slot: &RpiSlot, dtbs: Option<&Utf8Path>, fw: &Utf8Path) -> Result<()> {
++    let dest = fw.join(RPI_ENTRIES_DIR).join(&slot.name);
++    create_dir_all(dest.as_std_path()).with_context(|| format!("Creating {dest}"))?;
++
++    rpi_install_file(&slot.linux, &dest.join("vmlinuz"))?;
++    rpi_install_file(&slot.initrd, &dest.join("initrd"))?;
++    // The firmware appends cmdline.txt to the kernel command line; ostree's
++    // options line carries the ostree= argument that ostree-prepare-root reads,
++    // so it has to survive verbatim.
++    rpi_write_file(&dest.join("cmdline.txt"), &format!("{}\n", slot.options))?;
++
++    if let Some(dtbs) = dtbs {
++        rpi_stage_device_trees(dtbs, &dest)?;
++    }
++    Ok(())
++}
++
++/// Generate the config.txt family that selects which slot the firmware boots.
++///
++/// This follows the scheme proven by AlmaLinux's `rpi-bootc-bootloader`:
++/// `config.txt` is written once and left alone afterwards so user
++/// customisation survives, and the slot selection lives in generated includes
++/// that are rewritten on every deployment.
++///
++/// The `[gpio6=1]` / `[gpio6=0]` pair is a physical rollback button. GPIO6 has
++/// a pull-up, so an unconnected pin reads 1 and takes the default slot;
++/// grounding it selects the fallback. `config-bootc-default.txt` deliberately
++/// ends on an open `[gpio6=0]` filter so that the `include` of the fallback
++/// file which follows it in config.txt only takes effect when the button is
++/// held. A missing include is treated as blank by the firmware, so a truncated
++/// or absent default file degrades to the fallback slot rather than to nothing.
++fn rpi_write_config(fw: &Utf8Path, default: &RpiSlot, fallback: &RpiSlot) -> Result<()> {
++    let entries = RPI_ENTRIES_DIR;
++    let d = &default.name;
++    let f = &fallback.name;
++
++    rpi_write_file(
++        &fw.join("config-bootc-default.txt"),
++        &format!(
++            "[all]\n\
++             os_prefix={entries}/{d}/\n\
++             [gpio6=1]\n\
++             include {entries}/{d}/rpi-config.txt\n\
++             [all]\n\
++             [gpio6=0]\n"
++        ),
++    )?;
++
++    rpi_write_file(
++        &fw.join("config-bootc-fallback.txt"),
++        &format!(
++            "os_prefix={entries}/{f}/\n\
++             include {entries}/{f}/rpi-config.txt\n\
++             [all]\n"
++        ),
++    )?;
++
++    // Read only when the firmware's one-shot tryboot flag is set. The flag is
++    // cleared before the kernel starts, so a hang or reset returns to
++    // config.txt and the previous deployment without anything having to
++    // intervene. The watchdog turns "kernel started and then died" into that
++    // same reset.
++    rpi_write_file(
++        &fw.join("tryboot.txt"),
++        &format!(
++            "[all]\n\
++             dtparam=watchdog=on\n\
++             include config-bootc-common.txt\n\
++             \n\
++             [all]\n\
++             os_prefix={entries}/{f}/\n\
++             include {entries}/{f}/rpi-config.txt\n\
++             \n\
++             [all]\n\
++             kernel=vmlinuz\n\
++             initramfs initrd followkernel\n"
++        ),
++    )?;
++
++    // Written once. An [all] filter has to come first: without one the
++    // firmware's expression filters can default to false.
++    let config_txt = fw.join("config.txt");
++    if !config_txt.exists() {
++        rpi_write_file(
++            &config_txt,
++            "# Generated by bootc. Edits here are preserved, but prefer putting\n\
++             # customisation in config-bootc-common.txt, or in\n\
++             # /usr/lib/modules/<version>/rpi-config.txt inside the image so that\n\
++             # it is lifecycled with the deployment.\n\
++             \n\
++             [all]\n\
++             arm_64bit=1\n\
++             dtparam=watchdog=on\n\
++             include config-bootc-common.txt\n\
++             [all]\n\
++             \n\
++             # Slot selection, regenerated on every deployment.\n\
++             include config-bootc-default.txt\n\
++             # Parsed only if the default file is missing, or if GPIO6 is grounded.\n\
++             include config-bootc-fallback.txt\n\
++             \n\
++             [all]\n\
++             kernel=vmlinuz\n\
++             initramfs initrd followkernel\n",
++        )?;
++    }
++
++    if !fw.join("config-bootc-common.txt").exists() {
++        rpi_write_file(
++            &fw.join("config-bootc-common.txt"),
++            "# Customisation shared by every deployment. Not managed by bootc.\n\
++             enable_uart=1\n",
++        )?;
++    }
++    Ok(())
++}
++
++/// Set up booting via the Raspberry Pi firmware.
++///
++/// There is no bootloader to install. The VideoCore firmware in the Pi's SPI
++/// EEPROM reads `config.txt` off the FAT firmware partition and loads the
++/// kernel, initramfs and device tree itself. What it cannot do is read the Boot
++/// Loader Specification entries that ostree writes, so this translates them:
++/// each `/boot/loader/entries/ostree-N.conf` becomes a directory the firmware
++/// can be pointed at with `os_prefix`.
++///
++/// Naming the kernel explicitly as `vmlinuz` also bypasses the firmware's
++/// `kernel_2712.img` / `kernel8.img` filename selection entirely, so one flat
++/// name works across Pi models.
++#[context("Configuring Raspberry Pi firmware boot")]
++pub(crate) fn install_via_raspberrypi(
++    device: &bootc_blockdev::Device,
++    root_path: &Utf8Path,
++    deployment: &Dir,
++    deployment_path: &Utf8Path,
++) -> Result<()> {
++    println!("Configuring bootloader: Raspberry Pi firmware");
++
++    let esp = device.find_partition_of_esp_optional()?.ok_or_else(|| {
++        anyhow!(
++            "No EFI system partition found on {}; the Raspberry Pi firmware partition must be typed as an ESP",
++            device.path()
++        )
++    })?;
++    let esp_path = esp.path();
++
++    // Mounted somewhere of our own rather than relying on /boot/efi, so this
++    // behaves identically at install time and when re-syncing later.
++    let fw = Utf8PathBuf::from("/run/bootc/rpi-firmware");
++    create_dir_all(fw.as_std_path()).with_context(|| format!("Creating {fw}"))?;
++    mount::mount(&esp_path, &fw)?;
++
++    let result = (|| -> Result<()> {
++        let kernel = crate::kernel::find_kernel(deployment)
++            .context("Finding kernel in deployment")?
++            .ok_or_else(|| anyhow!("No kernel found in deployment"))?;
++        if kernel.kernel.unified {
++            bail!(
++                "This image ships a unified kernel image; the Raspberry Pi firmware boots a kernel and initramfs separately"
++            );
++        }
++        let dtbs = deployment_path
++            .join("usr/lib/modules")
++            .join(&kernel.kernel.version)
++            .join("dtbs");
++        let dtbs = if dtbs.exists() {
++            Some(dtbs)
++        } else {
++            tracing::warn!(
++                "No device trees at {dtbs}; relying on whatever the firmware partition already carries"
++            );
++            None
++        };
++
++        let slots = rpi_read_slots(root_path)?;
++        for slot in &slots {
++            rpi_stage_slot(slot, dtbs.as_deref(), &fw)?;
++        }
++        // The lowest-numbered entry is ostree's default. With only one
++        // deployment the fallback is the same slot, which is correct: there is
++        // nothing else to roll back to yet.
++        let default = &slots[0];
++        let fallback = slots.get(1).unwrap_or(default);
++        rpi_write_config(&fw, default, fallback)?;
++        println!(
++            "Boot slot: {} ({} entries)",
++            default.name,
++            slots.len()
++        );
++        Ok(())
++    })();
++
++    if let Err(e) = Command::new("umount").arg(fw.as_str()).run() {
++        tracing::warn!("Failed to unmount {fw}: {e}");
++    }
++    result
++}
+diff --git a/crates/lib/src/install.rs b/crates/lib/src/install.rs
+index c82d857..557d778 100644
+--- a/crates/lib/src/install.rs
++++ b/crates/lib/src/install.rs
+@@ -1885,6 +1885,18 @@ async fn install_with_sysroot(
+             Bootloader::Systemd | Bootloader::GrubCC => {
+                 anyhow::bail!("bootupd is required for ostree-based installs");
+             }
++            Bootloader::RaspberryPi => {
++                let root_path = rootfs
++                    .target_root_path
++                    .clone()
++                    .unwrap_or(rootfs.physical_root_path.clone());
++                crate::bootloader::install_via_raspberrypi(
++                    &rootfs.device_info,
++                    &root_path,
++                    &deployment_dir,
++                    &root_path.join(deployment_path.as_str()),
++                )?;
++            }
+             Bootloader::None => {
+                 tracing::debug!("Skip bootloader installation due set to None");
+             }
+diff --git a/crates/lib/src/install/baseline.rs b/crates/lib/src/install/baseline.rs
+index 0db968b..f30f41a 100644
+--- a/crates/lib/src/install/baseline.rs
++++ b/crates/lib/src/install/baseline.rs
+@@ -66,6 +66,13 @@ pub(crate) const EFIPN_SIZE_MB: u32 = 512;
+ /// We need more space than ostree as we have UKIs and UKI addons
+ /// We might also need to store UKIs for pinned deployments
+ pub(crate) const CFS_EFIPN_SIZE_MB: u32 = 1024;
++/// EFI partition size for Raspberry Pi installations.
++///
++/// The VideoCore firmware loads the kernel, initramfs, every `bcm*.dtb` and
++/// several hundred device tree overlays from this partition, and bootc keeps
++/// two deployments, so it has to hold two complete copies of all of that.
++/// 512MiB does not fit it.
++pub(crate) const RPI_EFIPN_SIZE_MB: u32 = 1024;
+ #[cfg(feature = "install-to-disk")]
+ pub(crate) const PREPBOOT_GUID: &str = "9E1A2D38-C612-4316-AA26-8B49521E5A8B";
+ #[cfg(feature = "install-to-disk")]
+@@ -312,6 +319,11 @@ pub(crate) fn install_create_rootfs(
+ 
+         let esp_size = if state.composefs_options.composefs_backend {
+             CFS_EFIPN_SIZE_MB
++        } else if matches!(
++            state.config_opts.bootloader,
++            Some(crate::spec::Bootloader::RaspberryPi)
++        ) {
++            RPI_EFIPN_SIZE_MB
+         } else {
+             EFIPN_SIZE_MB
+         };
+diff --git a/crates/lib/src/spec.rs b/crates/lib/src/spec.rs
+index 15ad101..37953bf 100644
+--- a/crates/lib/src/spec.rs
++++ b/crates/lib/src/spec.rs
+@@ -244,6 +244,14 @@ pub enum Bootloader {
+     Systemd,
+     /// Don't use a bootloader managed by bootc
+     None,
++    /// Use the Raspberry Pi firmware as the bootloader.
++    ///
++    /// The VideoCore firmware reads `config.txt` from the FAT partition and
++    /// loads the kernel, initramfs and device tree itself; there is no
++    /// second-stage bootloader to install. bootc translates each ostree
++    /// deployment into a directory the firmware can be pointed at with
++    /// `os_prefix`.
++    RaspberryPi,
+ }
+ 
+ #[derive(Debug, PartialEq, Eq)]
+@@ -262,6 +270,7 @@ impl Display for Bootloader {
+             Bootloader::GrubCC => "grub-cc",
+             Bootloader::Systemd => "systemd",
+             Bootloader::None => "none",
++            Bootloader::RaspberryPi => "raspberry-pi",
+         };
+ 
+         write!(f, "{}", string)
+@@ -277,6 +286,7 @@ impl FromStr for Bootloader {
+             "grub-cc" => Ok(Self::GrubCC),
+             "systemd" => Ok(Self::Systemd),
+             "none" => Ok(Self::None),
++            "raspberry-pi" => Ok(Self::RaspberryPi),
+             unrecognized => Err(anyhow::anyhow!("Unrecognized bootloader: '{unrecognized}'")),
+         }
+     }
+@@ -290,6 +300,12 @@ impl Bootloader {
+             Bootloader::Grub => Ok(BootloaderKind::GRUBClassic),
+             Bootloader::Systemd | Bootloader::GrubCC => Ok(BootloaderKind::BLSCompatible),
+             Bootloader::None => anyhow::bail!("Bootloader was None"),
++            // The Pi firmware does not read BLS entries; bootc translates them
++            // into an os_prefix directory for it. The composefs backend, which
++            // is what consults this, is not supported on the Pi.
++            Bootloader::RaspberryPi => {
++                anyhow::bail!("Bootloader raspberry-pi is not supported with the composefs backend")
++            }
+         }
+     }
+ }
+-- 
+2.55.0
+
+
+From 092d5c4ad0784c07549896f169743851c92f35e9 Mon Sep 17 00:00:00 2001
+From: Prasanth Baskar <prasanth@8gears.com>
+Date: Sun, 13 Sep 2026 03:38:48 +0530
+Subject: [PATCH 2/2] fixup: Use run_capture_stderr and cover the new match arm
+
+CommandRunExt has no bare run(); the umount uses run_capture_stderr. The
+Bootloader match in the composefs status path became non-exhaustive, so it
+gets an arm that points at Bootloader::kind(), which is where the composefs
+backend is actually rejected for the Pi.
+
+Signed-off-by: Prasanth Baskar <prasanth@8gears.com>
+---
+ crates/lib/src/bootc_composefs/status.rs | 6 ++++++
+ crates/lib/src/bootloader.rs             | 2 +-
+ 2 files changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/crates/lib/src/bootc_composefs/status.rs b/crates/lib/src/bootc_composefs/status.rs
+index 33c323b..d9f63f1 100644
+--- a/crates/lib/src/bootc_composefs/status.rs
++++ b/crates/lib/src/bootc_composefs/status.rs
+@@ -336,6 +336,12 @@ fn get_sorted_type1_boot_entries_helper(
+             Bootloader::None => {
+                 unreachable!("Bootloader checked during installation should not have been none")
+             }
++            // The Pi firmware does not read BLS entries, so it has no boot
++            // menu to order; the composefs backend is rejected for it in
++            // Bootloader::kind().
++            Bootloader::RaspberryPi => {
++                unreachable!("The raspberry-pi bootloader is not supported with the composefs backend")
++            }
+         };
+ 
+         if ascending { ord } else { ord.reverse() }
+diff --git a/crates/lib/src/bootloader.rs b/crates/lib/src/bootloader.rs
+index 31ac8e4..9145f6b 100644
+--- a/crates/lib/src/bootloader.rs
++++ b/crates/lib/src/bootloader.rs
+@@ -852,7 +852,7 @@ pub(crate) fn install_via_raspberrypi(
+         Ok(())
+     })();
+ 
+-    if let Err(e) = Command::new("umount").arg(fw.as_str()).run() {
++    if let Err(e) = Command::new("umount").arg(fw.as_str()).run_capture_stderr() {
+         tracing::warn!("Failed to unmount {fw}: {e}");
+     }
+     result
+-- 
+2.55.0
+
