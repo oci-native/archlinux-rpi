@@ -65,6 +65,24 @@
         ];
       };
 
+      # The same NixOS system, shaped for ostree deployment by bootc. This is
+      # what gets built into a container image and installed by
+      # `bootc install to-disk --bootloader raspberry-pi`.
+      nixosConfigurations.bootc = nixos-raspberrypi.lib.nixosSystem {
+        specialArgs = { inherit nixos-raspberrypi; };
+        modules = [
+          {
+            imports = with nixos-raspberrypi.nixosModules; [
+              raspberry-pi-5.base
+              raspberry-pi-5.page-size-16k
+            ];
+          }
+          ./modules/bootc.nix
+          ./modules/base.nix
+          { _module.args.secrets = secrets; }
+        ];
+      };
+
       packages.${system} = {
         sd-image = self.nixosConfigurations.sd.config.system.build.sdImage;
         toplevel = self.nixosConfigurations.sd.config.system.build.toplevel;

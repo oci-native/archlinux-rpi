@@ -23,7 +23,10 @@ if gh_token="$(gh auth token 2>/dev/null)" && [[ -n $gh_token ]]; then
     nix_extra_config="access-tokens = github.com=$gh_token"
 fi
 
+# Pinned: once an arm64 nixos/nix image is in local storage, podman will
+# happily resolve :latest to it and then every build runs under emulation.
 exec podman run --rm -i \
+    --platform linux/amd64 \
     --security-opt seccomp=unconfined \
     --security-opt label=disable \
     -v "$volume:/nix" \

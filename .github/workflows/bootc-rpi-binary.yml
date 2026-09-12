@@ -5,8 +5,12 @@
 # VideoCore firmware reads, and sizes the ESP at 1GiB so two deployments'
 # worth of kernel, initramfs, device trees and overlays fit.
 #
-# This runs on an arm64 runner because cross-compiling Rust with bootc's C
-# dependencies is fiddly and emulating the build is hours.
+# Runs on an arm64 runner because cross-compiling Rust against bootc's C
+# dependencies is fiddly and emulating the build takes hours.
+#
+# The compile happens inside a Fedora container rather than on the runner
+# directly: ostree-sys needs a newer libostree than Ubuntu 24.04 carries
+# (noble has 2024.5), and Fedora is what bootc upstream builds against.
 name: bootc raspberry-pi binary
 
 on:
@@ -22,20 +26,24 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04-arm
+    container: quay.io/fedora/fedora:43
     steps:
-      - uses: actions/checkout@v4
-
       - name: Install build dependencies
         run: |
           set -euxo pipefail
-          sudo apt-get update
           # bootc links ostree, glib, openssl, libselinux, zstd and the
           # util-linux libraries; selinux-sys runs bindgen, which needs libclang.
-          sudo apt-get install -y --no-install-recommends \
-              pkg-config clang libclang-dev \
-              libostree-dev libselinux1-dev libssl-dev libzstd-dev \
-              libglib2.0-dev libsystemd-dev libcap-dev \
-              libmount-dev libblkid-dev libcryptsetup-dev
+          dnf install -y --setopt=install_weak_deps=False \
+              git-core gcc pkgconf-pkg-config clang-devel \
+              rust cargo \
+              ostree-devel openssl-devel libzstd-devel glib2-devel \
+              libselinux-devel systemd-devel cryptsetup-devel \
+              libblkid-devel libmount-devel libcap-devel
+          pkg-config --modversion ostree-1
+          cargo --version
+          rustc --version
+
+      - uses: actions/checkout@v4
 
       - name: Clone bootc at the pinned base commit
         run: |
@@ -74,13 +82,14 @@ jobs:
           ./target/release/bootc install to-disk --help 2>&1 | tee help.txt
           grep -q "raspberry-pi" help.txt
 
-      - name: Strip and stage
+      - name: Stage
         run: |
           set -euxo pipefail
           mkdir -p out
           cp bootc/target/release/bootc out/bootc
           strip --strip-unneeded out/bootc || true
           sha256sum out/bootc | tee out/bootc.sha256
+          cp bootc/help.txt out/install-to-disk-help.txt
           ls -l out/
 
       - uses: actions/upload-artifact@v4
@@ -89,16 +98,25 @@ jobs:
           path: out/
           if-no-files-found: error
 
+  # Pushing needs a container runtime, which is on the runner rather than
+  # inside the build container, so it is a separate job.
+  publish:
+    runs-on: ubuntu-24.04-arm
+    needs: build
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: bootc-aarch64-raspberry-pi
+          path: out
+
       # ttl.sh is anonymous and ephemeral, so no credentials are needed and
       # nothing lingers. The image is only a carrier for the binary.
       - name: Push the binary to an ephemeral registry
         run: |
           set -euxo pipefail
           tag="${{ inputs.registry_tag }}"
-          ctr=$(buildah from scratch)
-          buildah copy "$ctr" out/bootc /usr/bin/bootc
-          buildah config --label org.opencontainers.image.description \
-              "bootc with the raspberry-pi bootloader backend, aarch64" "$ctr"
-          img=$(buildah commit "$ctr" bootc-rpi)
-          buildah push "$img" "docker://$tag"
+          chmod +x out/bootc
+          printf 'FROM scratch\nCOPY bootc /usr/bin/bootc\n' > out/Dockerfile
+          docker build -t "$tag" out
+          docker push "$tag"
           echo "pushed $tag"
