@@ -19,12 +19,13 @@
 #   sudo ./scripts/rpi-disk-image/build-disk-image.sh [OUT] [SIZE] [IMAGE_REF] [SECRETS_ENV]
 #
 #   OUT          output path for the .img (default: rpi-bootc.img)
-#   SIZE         truncate size, sparse (default: 25G). The deployment is
-#                about 3 GB whatever this is set to, and every extra GiB
-#                is zeroes that still have to be physically written to the
-#                card -- a 50G write took 66 minutes and the reader
-#                dropped off the USB bus before finishing. Keep it small;
-#                see docs/disk-image.md.
+#   SIZE         truncate size, sparse (default: 6G). The deployment is
+#                well under 1 GB after the size trim, and every extra GiB
+#                is zeroes that dd still has to physically write. The
+#                reader here is USB 2.0 at ~12 MB/s and has dropped off
+#                the bus twice mid-write, so a short write is a
+#                reliability measure as much as a speed one. Keep it
+#                small; see docs/disk-image.md.
 #   IMAGE_REF    the built container image to install (default:
 #                localhost/archlinux-rpi:latest)
 #   SECRETS_ENV  path to the gitignored secrets file (default: ./secrets.env)
@@ -32,7 +33,7 @@
 set -euo pipefail
 
 OUT="${1:-rpi-bootc.img}"
-SIZE="${2:-25G}"
+SIZE="${2:-6G}"
 IMAGE_REF="${3:-localhost/archlinux-rpi:latest}"
 SECRETS_ENV="${4:-secrets.env}"
 

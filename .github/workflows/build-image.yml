@@ -50,7 +50,7 @@ on:
           long sustained write is itself a risk (a 50G write dropped the
           USB device off the bus at 47.5 GB once).
         required: false
-        default: "25G"
+        default: "6G"
 
 concurrency:
   group: build-image-${{ github.ref }}
