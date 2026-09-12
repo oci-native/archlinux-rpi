@@ -85,6 +85,7 @@ RUN install -d /usr/lib/dracut/dracut.conf.d && \
         'hostonly=no' \
         'compress=zstd' \
         'add_dracutmodules+=" ostree bootc "' \
+        'force_drivers+=" erofs overlay "' \
         > /usr/lib/dracut/dracut.conf.d/30-archlinux-bootc-container-build.conf && \
     kernel_dir="$(find /usr/lib/modules -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)" && \
     test -n "$kernel_dir" && \
@@ -160,6 +161,14 @@ RUN rm -f /etc/systemd/network/en.network /etc/systemd/network/eth.network && \
 # bootc's separate `--composefs-backend` install flag, a different storage
 # backend entirely -- never pass it, and never ship a UKI (which would
 # auto-select it). See docs/TEAM-BRIEF.md and STATUS.md.
+# force_drivers (above) is what makes `enabled = yes` safe here. ALARM's
+# linux-rpi builds CONFIG_EROFS_FS=m and CONFIG_OVERLAY_FS=m rather than
+# =y, and ostree-prepare-root treats composefs `enabled = yes` as a hard
+# requirement -- "boot fails if it is not available". Merely having
+# erofs.ko present in the initramfs is not enough; force_drivers makes
+# dracut modprobe them before ostree-prepare-root runs. Without that the
+# failure is invisible: it happens in the initramfs, and this kernel has
+# no framebuffer console that early.
 RUN printf '%s\n' \
         '[composefs]' \
         'enabled = yes' \
