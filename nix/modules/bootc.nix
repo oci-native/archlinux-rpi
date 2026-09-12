@@ -36,6 +36,17 @@ in
     fsType = "ext4";
   };
 
+  # nixos-raspberrypi installs kernel, initrd, cmdline.txt and config.txt onto
+  # the firmware partition from an activation script. Under ostree that
+  # partition belongs to bootc's raspberry-pi backend, which writes one slot
+  # directory per deployment and an os_prefix pointing at it. Two writers, one
+  # partition, and the activation one has no idea about slots.
+  boot.loader.raspberry-pi.enable = lib.mkForce false;
+  # ...and nothing else takes over: bootc owns boot entirely. Without this
+  # NixOS falls back to GRUB and asserts on boot.loader.grub.devices.
+  boot.loader.grub.enable = lib.mkForce false;
+  boot.loader.generic-extlinux-compatible.enable = lib.mkForce false;
+
   boot.initrd.systemd.enable = true;
 
   # composefs needs all three: an EROFS metadata image on a loop device with
