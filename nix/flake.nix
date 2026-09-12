@@ -84,6 +84,12 @@
       };
 
       packages.${system} = {
+        # bootc with --bootloader raspberry-pi, built against nixpkgs so it
+        # runs inside the NixOS image it installs.
+        bootc-rpi = import ./pkgs/bootc-rpi.nix {
+          pkgs = self.nixosConfigurations.bootc.pkgs;
+        };
+
         sd-image = self.nixosConfigurations.sd.config.system.build.sdImage;
         toplevel = self.nixosConfigurations.sd.config.system.build.toplevel;
 
@@ -98,14 +104,7 @@
             inherit pkgs;
             inherit (pkgs) lib;
             config = cfg.config;
-            # Overridden in CI with the patched binary that knows
-            # --bootloader raspberry-pi.
-            bootcPackage =
-              if builtins.pathExists ./bootc-bin
-              then pkgs.runCommand "bootc-patched" { } ''
-                install -Dm0755 ${./bootc-bin}/bootc $out/bin/bootc
-              ''
-              else pkgs.bootc;
+            bootcPackage = import ./pkgs/bootc-rpi.nix { inherit pkgs; };
           };
       };
     };

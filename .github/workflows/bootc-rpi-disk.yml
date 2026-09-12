@@ -14,41 +14,18 @@ name: bootc raspberry-pi disk image
 on:
   workflow_dispatch:
     inputs:
-      binary_run_id:
-        description: "Run ID of 'bootc raspberry-pi binary' to take the patched bootc from. Empty means the latest successful one."
-        default: ""
       size:
         description: "Disk image size"
         default: "8G"
 
 permissions:
   contents: read
-  actions: read
 
 jobs:
   build:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-
-      - name: Fetch the patched bootc binary
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euxo pipefail
-          run_id="${{ inputs.binary_run_id }}"
-          if [ -z "$run_id" ]; then
-            run_id=$(gh run list --workflow=bootc-rpi-binary.yml \
-                       --status=success --limit 1 --json databaseId \
-                       --jq '.[0].databaseId')
-          fi
-          echo "Using binary from run $run_id"
-          mkdir -p nix/bootc-bin
-          gh run download "$run_id" -n bootc-aarch64-raspberry-pi -D nix/bootc-bin
-          chmod +x nix/bootc-bin/bootc
-          ./nix/bootc-bin/bootc --version
-          # Prove this is the patched build before spending an hour on it.
-          ./nix/bootc-bin/bootc install to-disk --help 2>&1 | grep -q raspberry-pi
 
       - name: Install Nix
         uses: cachix/install-nix-action@v30
@@ -57,6 +34,17 @@ jobs:
             experimental-features = nix-command flakes
             extra-substituters = https://nixos-raspberrypi.cachix.org
             extra-trusted-public-keys = nixos-raspberrypi.cachix.org-1:4iMO9LXa8BqhU+Rpg6LQKiGa2lsNh/j2oiYLNOQ5sPI=
+
+      - name: Build patched bootc
+        run: |
+          set -euxo pipefail
+          # Built by nix, not by a distro toolchain: this binary has to run
+          # inside the NixOS image it installs, and a Fedora-linked one cannot
+          # (no /lib64/ld-linux, no libostree where it expects it).
+          nix build --accept-flake-config -L \
+            ./nix#packages.aarch64-linux.bootc-rpi --out-link bootc-rpi
+          ./bootc-rpi/bin/bootc --version
+          ./bootc-rpi/bin/bootc install to-disk --help | grep -- raspberry-pi
 
       - name: Build the bootc container image
         run: |
