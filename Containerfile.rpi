@@ -20,7 +20,7 @@ FROM localhost/archlinux-rpi-base:latest
 # jq: the sync hook parses `bootc status --format json` with it.
 RUN --mount=type=tmpfs,dst=/tmp \
     --mount=type=cache,dst=/usr/lib/sysimage/cache/pacman \
-    pacman -Sy --needed --noconfirm \
+    pacman -Syu --needed --noconfirm \
         firmware-raspberrypi \
         jq \
         raspberrypi-bootloader \

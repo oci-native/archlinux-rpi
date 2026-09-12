@@ -30,6 +30,15 @@ RUN grep "= */var" /etc/pacman.conf | \
         -e "/DownloadUser/d" \
         /etc/pacman.conf
 
+# -Syu, not -Sy. ALARM is rolling and this image's base layer is not: a
+# plain -Sy install pulls whatever version the repo has today into a
+# rootfs full of yesterday's, and pacman refuses the partial upgrade the
+# moment any pinned pair splits across the two. Hit exactly that --
+# `installing systemd (261.3-1) breaks dependency 'systemd=261.2'
+# required by systemd-sysvcompat` -- on the first build after this RUN's
+# cache was invalidated. Upgrading the whole rootfs in the same
+# transaction is the only version of this that keeps working unattended.
+#
 # linux-rpi, not linux-rpi-16k: 16K pages break ELF alignment assumptions
 # in QEMU/KVM/Wine/Box86/Chromium, and this box runs arbitrary aarch64
 # container images as a container host. See docs/kernel-choice.md.
@@ -42,7 +51,7 @@ RUN grep "= */var" /etc/pacman.conf | \
 # links against at runtime.
 RUN --mount=type=tmpfs,dst=/tmp \
     --mount=type=cache,dst=/usr/lib/sysimage/cache/pacman \
-    pacman -Sy --needed --noconfirm \
+    pacman -Syu --needed --noconfirm \
         base \
         bubblewrap \
         cpio \
