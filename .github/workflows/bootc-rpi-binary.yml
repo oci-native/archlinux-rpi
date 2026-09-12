@@ -34,7 +34,7 @@ jobs:
           # bootc links ostree, glib, openssl, libselinux, zstd and the
           # util-linux libraries; selinux-sys runs bindgen, which needs libclang.
           dnf install -y --setopt=install_weak_deps=False \
-              git-core gcc pkgconf-pkg-config clang-devel \
+              git-core gcc pkgconf-pkg-config clang-devel file binutils \
               rust cargo \
               ostree-devel openssl-devel libzstd-devel glib2-devel \
               libselinux-devel systemd-devel cryptsetup-devel \
