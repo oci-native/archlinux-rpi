@@ -78,6 +78,20 @@ RUN kver="$(ls /usr/lib/modules)" && \
 # dracut CONFIG only. The initramfs itself is built much later, after
 # prepare-root.conf exists -- see the dracut run near the end of this file.
 #
+# force_drivers sdhci-of-dwcmshc is what lets a Pi 5 find its root disk.
+# The Pi 5's SD node is compatible = "raspberrypi,rp1-dwcmshc", driven by
+# sdhci-of-dwcmshc, and this kernel builds that as a MODULE -- whereas the
+# Pi 4's sdhci-iproc and sdhci-brcmstb are builtin (check
+# modules.builtin). So on a Pi 5 the root device cannot appear until the
+# initramfs loads that module, and merely shipping the .ko is not enough:
+# dracut has to modprobe it. Without this, dracut spins in initqueue until
+# it times out and nothing is ever written to disk -- which is exactly
+# what a booted card showed: zero journal files, machine-id still
+# "uninitialized", and an ext4 whose last mount was the build host.
+#
+# This is also why every qemu test passed. `-M raspi4b` is a Pi 4, so it
+# took the builtin sdhci-iproc path and never exercised this at all.
+#
 # `bootc` is deliberately NOT in add_dracutmodules. AlmaLinux's working
 # image ships the 51bootc module on disk but its check() returns 255 so it
 # stays out of the initramfs, and forcing it in here was wrong: 51bootc's
@@ -95,6 +109,7 @@ RUN install -d /usr/lib/dracut/dracut.conf.d && \
         'hostonly=no' \
         'compress=zstd' \
         'add_dracutmodules+=" ostree "' \
+        'force_drivers+=" sdhci-of-dwcmshc "' \
         > /usr/lib/dracut/dracut.conf.d/30-archlinux-bootc-container-build.conf
 
 # /run/systemd/resolve/resolv.conf is a live bind mount under emulated
@@ -196,6 +211,54 @@ RUN --mount=type=tmpfs,dst=/var/tmp \
     test -n "$kernel_dir" && \
     dracut --force "${kernel_dir}/initramfs.img" && \
     lsinitrd "${kernel_dir}/initramfs.img" | grep -q 'ostree/prepare-root.conf'
+
+# Size trim. Every removal here was checked against `pacman -Qi <pkg>`
+# "Required By" plus readelf -d / strings on the actual linked binaries
+# before it went in -- see the report this RUN was written for. Nothing
+# on the MUST-NOT-REMOVE list (linux-rpi, ostree, skopeo, bubblewrap,
+# dracut, systemd, networkmanager, openssh, sudo, e2fsprogs, dosfstools,
+# glib2/openssl/zstd, podman) is touched.
+#
+# criu / python-protobuf / protobuf / abseil-cpp / python: crun's pacman
+# metadata lists criu as a hard Depends On, but libcrun.so only
+# dlopen()s libcriu.so.2 at runtime for optional checkpoint/restore --
+# confirmed with `readelf -d` (no NEEDED entry) and the dlopen/"could not
+# load" strings in libcrun.so itself. python-protobuf exists only to
+# support criu's RPC config parsing, and nothing else in this image's
+# package set needs python or protobuf. Force-remove: pacman's dependency
+# graph is stale here, the ELF graph isn't.
+#
+# binutils / mkinitcpio / libmakepkg-dropins: linux-rpi hard-depends on
+# mkinitcpio for its kernel pacman hooks, but this image builds its
+# initramfs with dracut and never invokes mkinitcpio. binutils is pulled
+# in only as mkinitcpio/libmakepkg-dropins' own dependency; nothing that
+# actually runs on the deployed system links or shells out to it.
+#
+# gettext: no binary in this image links libintl.so -- there isn't one on
+# Arch, glibc supplies gettext() natively on Linux (confirmed with
+# `readelf -d` across podman, skopeo, ostree, systemd, NetworkManager).
+# pacman's own Depends On lists it, but only for translating pacman's CLI
+# messages; removing it loses translated strings, not function. Its own
+# dependents libxml2/icu are left alone: libarchive also depends on
+# libxml2 and is pacman's and podman's real archive backend, so that
+# chain is genuinely load-bearing.
+RUN --mount=type=tmpfs,dst=/tmp \
+    pacman -Rdd --noconfirm \
+        criu python-protobuf protobuf abseil-cpp python \
+        mkinitcpio libmakepkg-dropins binutils \
+        gettext
+
+# Headers, man/doc/info pages and static archives are compile-time or
+# documentation-time artifacts; nothing reads them at runtime, and pacman
+# doesn't verify file presence for already-installed packages. Locale
+# catalogs are trimmed to en_US (a 4 KiB stub -- English strings need no
+# translation, so there is effectively nothing to keep) plus the alias
+# file glibc's own lookups consult.
+RUN rm -rf /usr/include /usr/share/man /usr/share/doc /usr/share/info && \
+    find /usr/lib -name '*.a' -delete && \
+    find /usr/lib -name '*.h' -delete && \
+    find /usr/share/locale -mindepth 1 -maxdepth 1 \
+        ! -name 'en_US' ! -name 'locale.alias' -exec rm -rf {} +
 
 LABEL containers.bootc=1
 LABEL org.opencontainers.image.source="https://github.com/oci-native/archlinux-rpi"
