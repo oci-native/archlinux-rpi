@@ -38,9 +38,10 @@ name: Build aarch64 bootc image
 #
 # runs-on: adjust if GitHub's current arm64 hosted-runner label differs
 # from this at the time you read it -- labels have moved before.
+# Manual only. This builds the superseded Arch image; leaving it on push meant
+# every commit raced an arm64 runner against the NixOS/bootc builds that
+# replaced it.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       size:
