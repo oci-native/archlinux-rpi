@@ -45,6 +45,12 @@ pkgs.rustPlatform.buildRustPackage {
   buildAndTestSubdir = null;
   doCheck = false;
 
+  # bootc calls is_selinux_enabled() but nothing on the nix side emits
+  # `cargo:rustc-link-lib=selinux`; on Fedora the .pc file pulls it in
+  # implicitly. The buildInput supplies -L but not -l, so the link fails with
+  # "DSO missing from command line".
+  env.RUSTFLAGS = "-C link-arg=-lselinux";
+
   nativeBuildInputs = with pkgs; [
     pkg-config
     rustPlatform.bindgenHook
