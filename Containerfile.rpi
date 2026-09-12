@@ -55,23 +55,22 @@ RUN kver="$(ls /usr/lib/modules)" && \
         > "/usr/lib/modules/${kver}/rpi-config.txt"
 
 # Static default kargs (docs/kernel-layout.md decision 3): no hardcoded
-# root=, bootc/ostree supplies that from the BLS entry. console=serial0
-# is the Pi firmware's own alias for the primary UART, matched with
-# enable_uart=1 in config-bootc-common.txt (seed-firmware.sh).
+# root=, bootc/ostree supplies that from the BLS entry.
 #
-# console=tty1 is listed LAST and is not optional. The kernel sends printk
-# to every console= given, but /dev/console -- where the getty ends up --
-# is the last one listed. With only console=serial0,115200, HDMI gets
-# nothing at all: no boot messages, no login prompt, just a black screen
-# after the firmware splash. A board that boots perfectly is then
-# indistinguishable from one that never started, which is exactly the hole
-# the first hardware attempt fell into. AlmaLinux's working image passes no
-# console= at all and so defaults to tty0; we keep serial for headless
-# debugging and add tty1 so there is always something on screen.
+# No console= at all, deliberately, matching AlmaLinux's working image --
+# their cmdline.txt is just root=, rw, boot= and ostree=. Two earlier
+# attempts here were wrong: console=serial0,115200 alone sent every kernel
+# message to the UART and left HDMI black, and adding console=tty1 did not
+# help either, because this kernel builds DRM as a module and has no
+# simpledrm built in, so there is no framebuffer console at all until the
+# real root is mounted and modules load. HDMI silence during early boot is
+# therefore normal here and says nothing about whether the kernel is
+# running -- do not read it as a failure, and do not diagnose this board
+# over HDMI. Use ethernet or a UART adapter.
 RUN install -d /usr/lib/bootc/kargs.d && \
     printf '%s\n' \
-        'kargs = ["rootwait", "console=serial0,115200", "console=tty1"]' \
-        > /usr/lib/bootc/kargs.d/10-rpi-serial-console.toml
+        'kargs = ["rootwait"]' \
+        > /usr/lib/bootc/kargs.d/10-rpi-kargs.toml
 
 COPY docs/rpi-bootc-bootloader.arch-proposed /usr/bin/rpi-bootc-bootloader
 COPY docs/rpi-bootc-bootloader.service.arch-proposed /usr/lib/systemd/system/ostree-finalize-staged.service.d/rpi-bootc-bootloader.conf
