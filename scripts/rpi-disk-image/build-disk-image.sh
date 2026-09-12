@@ -19,8 +19,12 @@
 #   sudo ./scripts/rpi-disk-image/build-disk-image.sh [OUT] [SIZE] [IMAGE_REF] [SECRETS_ENV]
 #
 #   OUT          output path for the .img (default: rpi-bootc.img)
-#   SIZE         truncate size, sparse (default: 50G -- deliberately well
-#                under a "64GB" card's ~59.6 GiB actual usable capacity)
+#   SIZE         truncate size, sparse (default: 25G). The deployment is
+#                about 3 GB whatever this is set to, and every extra GiB
+#                is zeroes that still have to be physically written to the
+#                card -- a 50G write took 66 minutes and the reader
+#                dropped off the USB bus before finishing. Keep it small;
+#                see docs/disk-image.md.
 #   IMAGE_REF    the built container image to install (default:
 #                localhost/archlinux-rpi:latest)
 #   SECRETS_ENV  path to the gitignored secrets file (default: ./secrets.env)
@@ -28,7 +32,7 @@
 set -euo pipefail
 
 OUT="${1:-rpi-bootc.img}"
-SIZE="${2:-50G}"
+SIZE="${2:-25G}"
 IMAGE_REF="${3:-localhost/archlinux-rpi:latest}"
 SECRETS_ENV="${4:-secrets.env}"
 
@@ -83,7 +87,7 @@ EOF
 	exit 1
 fi
 
-# Fail before the 50G truncate rather than after it if secrets.env is
+# Fail before the truncate rather than after it if secrets.env is
 # malformed. The file is optional: this script runs both locally and in
 # CI, where it must never exist (gitignored, public repo). Without it the
 # result is a valid, bootable, unprovisioned image.
