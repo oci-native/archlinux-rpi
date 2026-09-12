@@ -75,6 +75,16 @@ RUN kver="$(ls /usr/lib/modules)" && \
     test -s /boot/kernel8.img && \
     install -m644 /boot/kernel8.img "/usr/lib/modules/${kver}/vmlinuz"
 
+# dracut CONFIG only. The initramfs itself is built much later, after
+# prepare-root.conf exists -- see the dracut run near the end of this file.
+#
+# `bootc` is deliberately NOT in add_dracutmodules. AlmaLinux's working
+# image ships the 51bootc module on disk but its check() returns 255 so it
+# stays out of the initramfs, and forcing it in here was wrong: 51bootc's
+# install() ends on a test for /usr/lib/composefs/setup-root-conf.toml,
+# which this image does not have, so install() returns 1 and we end up
+# with a half-installed module plus a second root-setup path racing
+# ostree-prepare-root. Match AlmaLinux and leave it out.
 RUN install -d /usr/lib/dracut/dracut.conf.d && \
     printf '%s\n' \
         'systemdsystemconfdir=/etc/systemd/system' \
@@ -84,12 +94,8 @@ RUN install -d /usr/lib/dracut/dracut.conf.d && \
         'reproducible=yes' \
         'hostonly=no' \
         'compress=zstd' \
-        'add_dracutmodules+=" ostree bootc "' \
-        'force_drivers+=" erofs overlay "' \
-        > /usr/lib/dracut/dracut.conf.d/30-archlinux-bootc-container-build.conf && \
-    kernel_dir="$(find /usr/lib/modules -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)" && \
-    test -n "$kernel_dir" && \
-    dracut --force "${kernel_dir}/initramfs.img"
+        'add_dracutmodules+=" ostree "' \
+        > /usr/lib/dracut/dracut.conf.d/30-archlinux-bootc-container-build.conf
 
 # /run/systemd/resolve/resolv.conf is a live bind mount under emulated
 # builds and can't be rm'd ("device or resource busy") -- harmless to
@@ -161,20 +167,35 @@ RUN rm -f /etc/systemd/network/en.network /etc/systemd/network/eth.network && \
 # bootc's separate `--composefs-backend` install flag, a different storage
 # backend entirely -- never pass it, and never ship a UKI (which would
 # auto-select it). See docs/TEAM-BRIEF.md and STATUS.md.
-# force_drivers (above) is what makes `enabled = yes` safe here. ALARM's
-# linux-rpi builds CONFIG_EROFS_FS=m and CONFIG_OVERLAY_FS=m rather than
-# =y, and ostree-prepare-root treats composefs `enabled = yes` as a hard
-# requirement -- "boot fails if it is not available". Merely having
-# erofs.ko present in the initramfs is not enough; force_drivers makes
-# dracut modprobe them before ostree-prepare-root runs. Without that the
-# failure is invisible: it happens in the initramfs, and this kernel has
-# no framebuffer console that early.
 RUN printf '%s\n' \
         '[composefs]' \
         'enabled = yes' \
         '[sysroot]' \
         'readonly = true' \
         > /usr/lib/ostree/prepare-root.conf
+
+# Build the initramfs HERE, not earlier. dracut's 50ostree module installs
+# /usr/lib/ostree/prepare-root.conf into the initramfs only if the file
+# already exists when dracut runs:
+#
+#   for r in /usr/lib /etc; do
+#       test -f "$r/ostree/prepare-root.conf" && inst_simple ...
+#
+# and ostree-prepare-root reads the INITRAMFS copy at boot, not the one in
+# /usr. Building before writing that file produced an initramfs with no
+# prepare-root.conf at all, which silently fell back to the compiled-in
+# default (composefs `maybe`, sysroot not readonly) -- so every composefs
+# and readonly setting in this file was inert on real hardware. Confirmed
+# by unpacking both our initramfs and AlmaLinux's: theirs contains the
+# file, ours did not.
+# --mount=type=tmpfs,dst=/var/tmp because the cleanup step above removes
+# /var, and dracut refuses to start without a usable tmpdir. A tmpfs keeps
+# it out of the committed image.
+RUN --mount=type=tmpfs,dst=/var/tmp \
+    kernel_dir="$(find /usr/lib/modules -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)" && \
+    test -n "$kernel_dir" && \
+    dracut --force "${kernel_dir}/initramfs.img" && \
+    lsinitrd "${kernel_dir}/initramfs.img" | grep -q 'ostree/prepare-root.conf'
 
 LABEL containers.bootc=1
 LABEL org.opencontainers.image.source="https://github.com/oci-native/archlinux-rpi"
