@@ -30,36 +30,36 @@ in
 {
   imports = [ (modulesPath + "/installer/sd-card/sd-image.nix") ];
 
-  # nixos-hardware's raspberry-pi/common/firmware.nix installs its own
-  # populateFirmwareCommands with lib.mkForce the moment an sdImage module is
-  # in scope. Its script stages the VideoCore blobs and every Pi 0-4 DTB and
-  # then stops -- it never copies a kernel, because it assumes U-Boot will
-  # fetch one over extlinux. Left enabled, it overrides the block below and
-  # produces a FAT partition with nothing bootable on it.
-  hardware.raspberry-pi.firmware.enable = lib.mkForce false;
-
   sdImage = {
     imageBaseName = "nixos-rpi5";
     compressImage = false;
     firmwareSize = 512;
 
-    populateFirmwareCommands = lib.mkForce ''
-      cp ${fwBoot}/bootcode.bin firmware/ 2>/dev/null || true
-      cp ${fwBoot}/start*.elf    firmware/
-      cp ${fwBoot}/fixup*.dat    firmware/
+    # nixos-hardware's raspberry-pi/common/firmware.nix sets this with mkForce
+    # the moment an sdImage module is in scope, and not conditionally on
+    # hardware.raspberry-pi.firmware.enable. Its script stages the VideoCore
+    # blobs and every Pi 0-4 DTB and then stops -- it never copies a kernel,
+    # because it assumes U-Boot will fetch one over extlinux.
+    #
+    # An ordinary definition here is discarded outright (priority 100 against
+    # their 50). Matching them with mkForce is worse: the option is types.lines,
+    # so equal priorities merge, both scripts run, and ours then fails trying to
+    # overwrite the mode-0444 files theirs just copied out of the store.
+    # mkOverride 10 replaces theirs, which is what we actually want.
+    populateFirmwareCommands = lib.mkOverride 10 ''
+      install -Dm0644 -t firmware/ ${fwBoot}/bootcode.bin ${fwBoot}/start*.elf ${fwBoot}/fixup*.dat
 
       # The base DTB has to match the kernel, so it comes from the kernel, not
       # from the firmware package. The overlays directory comes from the
       # firmware package because the VideoCore firmware itself reads
       # overlay_map.dtb and hat_map.dtb out of it, and the kernel tree has
       # neither.
-      cp ${config.boot.kernelPackages.kernel}/dtbs/broadcom/bcm2712*-rpi-5*.dtb firmware/
-      mkdir -p firmware/overlays
-      cp -r ${fwBoot}/overlays/. firmware/overlays/
+      install -Dm0644 -t firmware/ ${config.boot.kernelPackages.kernel}/dtbs/broadcom/bcm2712*-rpi-5*.dtb
+      install -Dm0644 -t firmware/overlays/ ${fwBoot}/overlays/*
 
-      cp ${kernelImage} firmware/Image
-      cp ${initrdImage} firmware/initrd
-      cp ${configTxt}   firmware/config.txt
+      install -Dm0644 ${kernelImage} firmware/Image
+      install -Dm0644 ${initrdImage} firmware/initrd
+      install -Dm0644 ${configTxt}   firmware/config.txt
       echo '${cmdline}' > firmware/cmdline.txt
     '';
 
