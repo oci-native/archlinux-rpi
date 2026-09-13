@@ -146,8 +146,12 @@ let
     # passwd and group only. /etc/shadow carries password hashes and this image
     # is pushable to a registry, so it must never be baked into a layer; the
     # users module writes it at activation from the deployed configuration.
-    install -Dm0644 -L ${config.system.build.etc}/etc/passwd $out/etc/passwd
-    install -Dm0644 -L ${config.system.build.etc}/etc/group  $out/etc/group
+    # Both are symlinks into the store, and install(1) has no dereference flag,
+    # so resolve them first.
+    install -Dm0644 "$(readlink -f ${config.system.build.etc}/etc/passwd)" \
+      $out/etc/passwd
+    install -Dm0644 "$(readlink -f ${config.system.build.etc}/etc/group)" \
+      $out/etc/group
 
     install -Dm0644 ${baseDirsTmpfiles} \
       $out/usr/lib/tmpfiles.d/bootc-base-dirs.conf
