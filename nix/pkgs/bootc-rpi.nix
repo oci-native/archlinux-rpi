@@ -12,6 +12,8 @@
 { pkgs }:
 
 let
+  ostree = import ./ostree-composefs.nix { inherit pkgs; };
+
   # Pinned to the same commit vendor/bootc-base-commit.txt records, so the
   # patch applies and CI and local builds agree.
   rev = "db1f3ef3266415bc91aa845ee9f806ffb53136d6";
@@ -56,8 +58,7 @@ pkgs.rustPlatform.buildRustPackage {
     rustPlatform.bindgenHook
   ];
 
-  buildInputs = with pkgs; [
-    ostree
+  buildInputs = [ ostree ] ++ (with pkgs; [
     glib
     openssl
     libselinux
@@ -66,7 +67,7 @@ pkgs.rustPlatform.buildRustPackage {
     cryptsetup
     util-linux
     libcap
-  ];
+  ]);
 
   postInstall = ''
     # Fail the build rather than the install if the patch silently did not

@@ -16,6 +16,9 @@
 { pkgs, lib, config, bootcPackage ? pkgs.bootc }:
 
 let
+  # The same composefs-enabled ostree bootc was linked against.
+  ostree = import ../pkgs/ostree-composefs.nix { inherit pkgs; };
+
   toplevel = config.system.build.toplevel;
   kernelPkg = config.boot.kernelPackages.kernel;
   kver = kernelPkg.modDirVersion;
@@ -224,7 +227,7 @@ pkgs.dockerTools.streamLayeredImage {
     Env = [
       "PATH=${lib.makeBinPath [
         bootcPackage
-        pkgs.ostree
+        ostree
         # bootc creates a container image store during install and drives it
         # with podman, resolved in-container rather than in the host mount
         # namespace, so a real podman has to be in the image.
