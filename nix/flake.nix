@@ -42,7 +42,11 @@
           # Left empty on purpose. Access is by SSH key, so no password hash
           # is ever baked into an image.
           password = "";
-          wifiSsid = "";
+          # An SSID is broadcast in the clear by every access point, so it is
+          # not a secret and can be built into the image. The passphrase is,
+          # and is never here: wpa_supplicant reads it at runtime from
+          # secretsFile, written onto the card by scripts/provision-wifi.sh.
+          wifiSsid = "BUPD";
           wifiPsk = "";
         };
     in
