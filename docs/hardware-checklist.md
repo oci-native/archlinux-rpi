@@ -205,3 +205,38 @@ results the same way (append to the board's evidence directory).
   across both boards is exactly the evidence package a platform page needs, and running
   it clean-room on the second board after writing up the first is the test matrix's own
   stated verification method.
+
+## HANDOFF
+
+Written 2026-09-11, pre-hardware. Session closed 2026-09-14 without this checklist ever
+having been run as written.
+
+**Done:** every command above was reasoned from package/tool evidence gathered the same
+session (kernel-choice.md, alarm-contribution.md, kernel-layout.md), not guessed at. The
+tiering (read-only capture vs. state-changing functional checks) and the safety
+guardrails (no EEPROM write, no `/dev/sdb`, confirm board before every block) match the
+house rules in `TEAM-BRIEF.md` as they stood at the time.
+
+**What actually happened instead:** by 2026-09-13, two cards had been flashed and booted
+against real hardware directly, ahead of and independent of this checklist — see the
+"It flashed, it verified, and it still did not boot" section in `docs/disk-image.md` and
+the superseding note at the top of `docs/kernel-choice.md`. That work answered board/SD
+reader reliability and kernel-boot questions this checklist never got to ask, by more
+direct means (serial-adjacent evidence: firmware log reads, journal state, mount
+timestamps) than the `vcgencmd`/`lsblk`/`journalctl` commands specified here. It also
+surfaced a real bug this checklist would not have caught: a USB 2.0 card reader dropping
+off the bus mid-write, still unresolved as of the last entry in `docs/disk-image.md`.
+
+**Not confirmed, and now moot or open depending on how the project proceeds:** none of
+Tier 1's identity/EEPROM/kernel-config capture or any of Tier 2's functional checks
+(wifi, Bluetooth, HDMI, NVMe boot) has been run through this checklist specifically. If
+the project reaches a board that actually mounts root and reaches a login prompt, this
+checklist is still the right next step for the ALARM platform-page evidence package —
+nothing above needs rewriting for that, it was never invalidated, just overtaken by a
+more urgent boot-blocking bug.
+
+**Trap for whoever picks this up:** don't assume this checklist's absence from later
+commits means it was tried and abandoned. It was never run. If the reader/card
+reliability question in `docs/disk-image.md` gets settled and a board boots, come back
+here before improvising a fresh evidence pass — the commands are still correct, they
+were just never exercised.
