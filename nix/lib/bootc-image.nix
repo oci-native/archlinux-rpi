@@ -182,6 +182,10 @@ pkgs.dockerTools.streamLayeredImage {
       "PATH=${lib.makeBinPath [
         bootcPackage
         pkgs.ostree
+        # bootc creates a container image store during install and drives it
+        # with podman, resolved in-container rather than in the host mount
+        # namespace, so a real podman has to be in the image.
+        pkgs.podman
         pkgs.skopeo
         pkgs.bubblewrap
         pkgs.dosfstools
