@@ -89,7 +89,7 @@ jobs:
             localhost/nixos-rpi-bootc:latest \
             bootc install to-disk \
               --via-loopback /target/rpi-bootc.img \
-              --filesystem ext4 \
+              --filesystem xfs \
               --bootloader raspberry-pi \
               --wipe --skip-fetch-check
           sudo chown "$(id -u):$(id -g)" rpi-bootc.img

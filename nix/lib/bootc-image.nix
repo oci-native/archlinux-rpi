@@ -38,9 +38,8 @@ let
     readonly = true
   '';
 
-  # Kernel arguments bootc bakes into the BLS entry it writes. `init=` is what
-  # NixOS's initrd-find-nixos-closure reads to locate the system closure, and
-  # rootwait is needed because the Pi's SD controller probes late.
+  # Kernel arguments bootc bakes into the BLS entry it writes.
+  #
   # `init=` is what NixOS's initrd-find-nixos-closure reads to locate the
   # system closure; `ostree=` is added by ostree itself and read by
   # ostree-prepare-root. rootwait is needed because the Pi's SD controller
@@ -62,6 +61,16 @@ let
       "systemd.log_level=info",
       "systemd.show_status=true",
     ]
+  '';
+
+  # bootc adds -O verity to mkfs.ext4 unconditionally, and whether this kernel
+  # can mount such a filesystem depends on CONFIG_FS_VERITY. AlmaLinux's Pi
+  # images avoid the question by using xfs, so do the same. Declaring it here
+  # rather than only on the command line means `bootc install` does the right
+  # thing however it is invoked.
+  installConf = pkgs.writeText "20-rpi.toml" ''
+    [install]
+    root-fs-type = "xfs"
   '';
 
   # podman resolves uid 0 to find HOME, and NixOS has no build-time passwd to
@@ -170,6 +179,7 @@ let
     # --- ostree and bootc configuration -------------------------------------
     install -Dm0644 ${prepareRootConf} $out/usr/lib/ostree/prepare-root.conf
     install -Dm0644 ${kargs}           $out/usr/lib/bootc/kargs.d/10-rpi.toml
+    install -Dm0644 ${installConf}     $out/usr/lib/bootc/install/20-rpi.toml
 
     # systemd's SwitchRoot refuses a target without an os-release, and NixOS
     # only writes /etc/os-release at activation, which is after switch-root.
@@ -264,6 +274,7 @@ pkgs.dockerTools.streamLayeredImage {
         pkgs.bubblewrap
         pkgs.dosfstools
         pkgs.e2fsprogs
+        pkgs.xfsprogs
         pkgs.util-linux
         pkgs.coreutils
         pkgs.bashInteractive

@@ -33,7 +33,10 @@ in
   # ostree-prepare-root pivots into the deployment inside it.
   fileSystems."/" = {
     device = "/dev/disk/by-label/root";
-    fsType = "ext4";
+    # xfs, matching AlmaLinux's Pi images. bootc adds -O verity to every
+    # mkfs.ext4 it runs and there is no flag to stop it, so ext4 makes the boot
+    # depend on CONFIG_FS_VERITY in the vendor kernel.
+    fsType = "xfs";
   };
 
   # nixos-raspberrypi installs kernel, initrd, cmdline.txt and config.txt onto
