@@ -60,6 +60,19 @@ let
     nogroup:x:65534:
   '';
 
+  # containers/image refuses to do anything without a signature policy, and
+  # looks only at ~/.config/containers/policy.json and /etc/containers/policy.json.
+  # Distro images get this from the containers-common package; a NixOS closure
+  # has no equivalent, so ship it.
+  #
+  # insecureAcceptAnything matches what every distro ships as the default.
+  # Verification for bootc's own upgrades is a separate mechanism (ostree
+  # signatures and the composefs digest), not this file.
+  containersPolicy = pkgs.writeText "policy.json" (builtins.toJSON {
+    default = [{ type = "insecureAcceptAnything"; }];
+    transports.docker-daemon."" = [{ type = "insecureAcceptAnything"; }];
+  });
+
   # /var starts empty, so the toplevel symlinks into it need their targets
   # created on first boot.
   baseDirsTmpfiles = pkgs.writeText "bootc-base-dirs.conf" ''
@@ -166,6 +179,7 @@ let
     # users module writes it at activation from the deployed configuration.
     install -Dm0644 ${minimalPasswd} $out/etc/passwd
     install -Dm0644 ${minimalGroup}  $out/etc/group
+    install -Dm0644 ${containersPolicy} $out/etc/containers/policy.json
 
     install -Dm0644 ${baseDirsTmpfiles} \
       $out/usr/lib/tmpfiles.d/bootc-base-dirs.conf
