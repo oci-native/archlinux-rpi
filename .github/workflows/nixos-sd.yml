@@ -1,0 +1,70 @@
+# Build a plain NixOS SD image for the Raspberry Pi 5. No bootc, no ostree.
+#
+# Uses nixos-raspberrypi's own boot path and vendor kernel -- the same
+# combination as their installer image, which is the only thing that has
+# actually booted this Pi.
+#
+# Runs on arm64 because the Pi 5 vendor kernel is a 16K-page build, which puts
+# jemalloc and much of the package set outside any binary cache; emulating that
+# is hours.
+name: nixos sd image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            extra-substituters = https://nixos-raspberrypi.cachix.org
+            extra-trusted-public-keys = nixos-raspberrypi.cachix.org-1:4iMO9LXa8BqhU+Rpg6LQKiGa2lsNh/j2oiYLNOQ5sPI=
+
+      - name: Build the SD image
+        run: |
+          set -euxo pipefail
+          # secrets.env is not in CI, so the flake falls back to its
+          # placeholder user. base.nix sets services.getty.autologinUser, so
+          # the console logs straight in and a password can be set there.
+          nix build --accept-flake-config -L \
+            ./nix#packages.aarch64-linux.sd-image --out-link sd-image
+          ls -lL sd-image/sd-image/
+
+      - name: Verify the firmware partition is bootable
+        run: |
+          set -euxo pipefail
+          img=$(echo sd-image/sd-image/*.img)
+          cp "$img" nixos-rpi5.img
+          chmod u+w nixos-rpi5.img
+          sudo sfdisk -d nixos-rpi5.img
+          loop=$(sudo losetup --find --show --partscan --read-only nixos-rpi5.img)
+          mkdir -p fw && sudo mount -o ro "${loop}p1" fw
+          # The thing that has silently gone missing twice: a kernel.
+          find fw -maxdepth 2 -name 'kernel*' -o -maxdepth 2 -name 'initrd' \
+               -o -maxdepth 2 -name 'cmdline.txt' -o -maxdepth 2 -name 'config.txt' | sort
+          echo "--- config.txt ---";  sudo cat fw/config.txt
+          sudo find fw -name cmdline.txt -exec sh -c 'echo "--- {} ---"; cat {}' \;
+          sudo umount fw && sudo losetup -d "$loop"
+
+      - name: Compress
+        run: |
+          set -euxo pipefail
+          zstd -T0 -3 --sparse nixos-rpi5.img -o nixos-rpi5.img.zst
+          sha256sum nixos-rpi5.img.zst | tee nixos-rpi5.img.zst.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nixos-rpi5-sd-image
+          path: |
+            nixos-rpi5.img.zst
+            nixos-rpi5.img.zst.sha256
+          if-no-files-found: error
