@@ -170,6 +170,14 @@ pkgs.dockerTools.streamLayeredImage {
     };
     # bootc shells out to mkfs.fat, mkfs.ext4, ostree, skopeo and bubblewrap
     # during install, and resolves them on PATH from inside this image.
+    #
+    # The FHS directories at the end are not decoration. bootc re-execs itself
+    # into the host's mount namespace to run `podman` (podman.rs) and `udevadm`
+    # (install/baseline.rs), and those lookups inherit this PATH. A nix-only
+    # PATH resolves them to store paths that do not exist on the host, which
+    # fails as "Re-exec in host mountns: exec: No such file or directory".
+    # Inside the image these directories hold only /bin/sh and /usr/bin/env, so
+    # nothing shadows the store paths.
     Env = [
       "PATH=${lib.makeBinPath [
         bootcPackage
@@ -184,7 +192,7 @@ pkgs.dockerTools.streamLayeredImage {
         pkgs.gnugrep
         pkgs.gnused
         pkgs.jq
-      ]}"
+      ]}:/usr/bin:/bin:/usr/sbin:/sbin"
     ];
     Cmd = [ "${bootcPackage}/bin/bootc" ];
   };
