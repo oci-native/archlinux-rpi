@@ -723,3 +723,80 @@ is bootc-image-builder with a custom `bib-config.toml`, matching AlmaLinux's
 three-partition scheme, and part 2's filesystem/write-reduction reasoning
 still applies either way, but part 3's script would need a rewrite, not just
 a tweak.
+
+## Flashing from this workstation with rpi-imager
+
+Side note from a session that went looking for a GUI alternative to the
+`dd` procedure above. It is workstation tooling, not part of the image
+build, but it cost an hour to work out and is worth not rediscovering.
+
+`imager_2.0.11.1_amd64.AppImage` run under `sudo` dies before it draws
+anything:
+
+```
+Authorization required, but no authorization protocol specified
+qt.qpa.xcb: could not connect to display :0
+This application failed to start because no Qt platform plugin could be
+initialized.
+```
+
+The cause is the Hyprland session, not the AppImage. `sudo` drops
+`WAYLAND_DISPLAY` from the environment but leaves `DISPLAY=:0` behind, so
+Qt falls back to the xcb plugin and tries Xwayland. Xwayland here is
+started as `Xwayland :0 -rootless -core -listenfd ... -wm ...`, and no
+`XAUTHORITY` is set in any process on the session -- not in Hyprland's own
+environment, not in waybar's or the terminal's, and there is no
+`~/.Xauthority` file. Root has no cookie to present and the server turns
+it away. The `libxcb-cursor0` line in that output is xcb-only noise and is
+irrelevant once Qt is on Wayland.
+
+The fix is to stop using `sudo`. Version 2 elevates itself: the binary
+carries a pkexec path, writes a policy file named
+`com.raspberrypi.rpi-imager.appimage-<hash>.policy` into
+`/usr/share/polkit-1/actions`, and offers an "Install Authorization"
+button the first time it needs to write. The GUI runs unprivileged and
+only the device write goes through polkit.
+
+```
+~/Downloads/imager_2.0.11.1_amd64.AppImage
+```
+
+Verified: starts on Qt Wayland, enumerates `/dev/sda`, `/dev/sdb` and
+`/dev/nvme0n1`, fetches the OS list. No sudo anywhere.
+
+If something ever does need it as root, force the Wayland plugin and hand
+the socket through rather than fighting Xwayland. Root bypasses DAC so
+`/run/user/1000/wayland-1` opens fine, and Wayland has no cookie to
+present in the first place:
+
+```
+sudo -E env WAYLAND_DISPLAY=wayland-1 XDG_RUNTIME_DIR=/run/user/1000 \
+  QT_QPA_PLATFORM=wayland ~/Downloads/imager_2.0.11.1_amd64.AppImage
+```
+
+That fallback is reasoned, not tested -- `sudo -n` needed a password in
+the session where this was written, so it never actually ran.
+
+Its UI also offers to enable passwordless sudo. Don't. It hands full root
+to any process running as your user, permanently, to save one prompt.
+
+### HANDOFF
+
+**Done:** the sudo/Wayland failure is diagnosed and the unprivileged
+launch is confirmed working end to end, up to device enumeration.
+
+**Half-done:** no card has actually been written with rpi-imager. The
+polkit "Install Authorization" flow was read out of the binary, not
+exercised, so the first person to click Write is the one who finds out
+whether it behaves.
+
+**Next:** if rpi-imager is going to replace the `dd` procedure, compare
+the two on a real card first. `dd ... oflag=direct` was chosen here for a
+specific reason -- the 50G flash died when a large dirty page cache was
+flushed at a reader that could not keep up -- and rpi-imager's own write
+and verify path has not been checked against that failure mode on this
+reader.
+
+**Trap:** the `dd` procedure above is still the documented one. Nothing
+in this section supersedes it, and the reader remains a suspect (see the
+NixOS pivot notes) regardless of which tool drives the write.
