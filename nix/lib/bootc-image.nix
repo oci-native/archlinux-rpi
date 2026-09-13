@@ -42,6 +42,24 @@ let
     kargs = ["rootwait", "init=${toplevel}/init"]
   '';
 
+  # podman resolves uid 0 to find HOME, and NixOS has no build-time passwd to
+  # copy: it writes /etc/passwd from an activation script, which runs after
+  # install and after first boot. So ship the minimum that makes uid 0
+  # resolvable during install. The users module rewrites both files at
+  # activation from the deployed configuration.
+  #
+  # Note what is absent: /etc/shadow. It carries password hashes and this image
+  # is pushable to a registry, so it must never be baked into a layer.
+  minimalPasswd = pkgs.writeText "passwd" ''
+    root:x:0:0:System administrator:/root:/bin/sh
+    nobody:x:65534:65534:Unprivileged account:/var/empty:/bin/sh
+  '';
+
+  minimalGroup = pkgs.writeText "group" ''
+    root:x:0:
+    nogroup:x:65534:
+  '';
+
   # /var starts empty, so the toplevel symlinks into it need their targets
   # created on first boot.
   baseDirsTmpfiles = pkgs.writeText "bootc-base-dirs.conf" ''
@@ -146,12 +164,8 @@ let
     # passwd and group only. /etc/shadow carries password hashes and this image
     # is pushable to a registry, so it must never be baked into a layer; the
     # users module writes it at activation from the deployed configuration.
-    # Both are symlinks into the store, and install(1) has no dereference flag,
-    # so resolve them first.
-    install -Dm0644 "$(readlink -f ${config.system.build.etc}/etc/passwd)" \
-      $out/etc/passwd
-    install -Dm0644 "$(readlink -f ${config.system.build.etc}/etc/group)" \
-      $out/etc/group
+    install -Dm0644 ${minimalPasswd} $out/etc/passwd
+    install -Dm0644 ${minimalGroup}  $out/etc/group
 
     install -Dm0644 ${baseDirsTmpfiles} \
       $out/usr/lib/tmpfiles.d/bootc-base-dirs.conf
