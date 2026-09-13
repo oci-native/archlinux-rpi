@@ -34,8 +34,13 @@
         if builtins.pathExists ./secrets.nix
         then import ./secrets.nix
         else {
-          hostname = "rpi5";
-          user = "pi";
+          # Not secrets: a hostname and a login name. Defaulting them here
+          # means CI builds the real machine rather than a placeholder, and
+          # nothing sensitive has to reach a public repository's runner.
+          hostname = "citadel";
+          user = "bupd";
+          # Left empty on purpose. Access is by SSH key, so no password hash
+          # is ever baked into an image.
           password = "";
           wifiSsid = "";
           wifiPsk = "";
