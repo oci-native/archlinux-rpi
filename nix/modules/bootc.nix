@@ -49,6 +49,12 @@ in
 
   boot.initrd.systemd.enable = true;
 
+  # If stage 1 fails, drop to a shell on the console instead of hanging. With
+  # a console now configured this turns a silent brick into a readable error,
+  # which is the only way ostree-prepare-root failing inside a NixOS initrd
+  # will ever be diagnosable.
+  boot.initrd.systemd.emergencyAccess = true;
+
   # composefs needs all three: an EROFS metadata image on a loop device with
   # overlayfs stacked over it.
   boot.initrd.availableKernelModules = [ "erofs" "overlay" "loop" ];

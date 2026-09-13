@@ -41,8 +41,27 @@ let
   # Kernel arguments bootc bakes into the BLS entry it writes. `init=` is what
   # NixOS's initrd-find-nixos-closure reads to locate the system closure, and
   # rootwait is needed because the Pi's SD controller probes late.
+  # `init=` is what NixOS's initrd-find-nixos-closure reads to locate the
+  # system closure; `ostree=` is added by ostree itself and read by
+  # ostree-prepare-root. rootwait is needed because the Pi's SD controller
+  # probes late.
+  #
+  # The console arguments are not optional until this boots reliably. Two
+  # images have now been shipped with no console on either channel, which makes
+  # a healthy boot and a stage-1 panic look identical from the outside.
+  # earlycon starts before any console driver binds and uses
+  # /chosen/stdout-path, so it survives even if the console= arguments are
+  # wrong.
   kargs = pkgs.writeText "10-rpi.toml" ''
-    kargs = ["rootwait", "init=${toplevel}/init"]
+    kargs = [
+      "rootwait",
+      "init=${toplevel}/init",
+      "earlycon",
+      "console=tty0",
+      "console=serial0,115200",
+      "systemd.log_level=info",
+      "systemd.show_status=true",
+    ]
   '';
 
   # podman resolves uid 0 to find HOME, and NixOS has no build-time passwd to
@@ -100,6 +119,15 @@ let
     uart_2ndstage=1
     kernel=vmlinuz
     initramfs initrd followkernel
+
+    # Without a display driver the firmware's framebuffer is torn down when the
+    # kernel starts and nothing takes over, so HDMI goes black whether the boot
+    # succeeded or died on the first instruction. These three lines are what
+    # every working Pi config carries and what the first two images here were
+    # missing.
+    dtoverlay=vc4-kms-v3d
+    disable_fw_kms_setup=1
+    max_framebuffers=2
   '';
 
   # Everything outside /nix/store. Built as a real directory tree so that
