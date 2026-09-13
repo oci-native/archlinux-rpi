@@ -90,6 +90,19 @@
           pkgs = self.nixosConfigurations.bootc.pkgs;
         };
 
+        # Same image with composefs disabled, for bisecting whether the EROFS
+        # mount is what stops the Pi booting. ostree falls back to a hardlink
+        # checkout, so the boot path never touches EROFS.
+        bootc-image-plain =
+          let cfg = self.nixosConfigurations.bootc; in
+          import ./lib/bootc-image.nix {
+            pkgs = cfg.pkgs;
+            inherit (cfg.pkgs) lib;
+            config = cfg.config;
+            bootcPackage = import ./pkgs/bootc-rpi.nix { pkgs = cfg.pkgs; };
+            composefs = false;
+          };
+
         sd-image = self.nixosConfigurations.sd.config.system.build.sdImage;
         toplevel = self.nixosConfigurations.sd.config.system.build.toplevel;
 

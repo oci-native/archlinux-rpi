@@ -13,7 +13,14 @@
 # `ostree.diffid` label, so `base_commit` is None, so /nix survives verbatim.
 # An image derived FROM an existing bootc base would have its /nix silently
 # filtered out. Hence: FROM scratch, always.
-{ pkgs, lib, config, bootcPackage ? pkgs.bootc }:
+# composefs can be turned off to bisect. It is wanted in the end -- it is what
+# makes the deployment root a read-only image, which is what a /nix/store
+# wants -- but it mounts an EROFS image, and this kernel is a 16K-page build
+# (bcm2712_defconfig) while composefs writes 4K-block EROFS. AlmaLinux's
+# working Pi images use a 4K-page kernel, so they never exercise that
+# combination. With composefs off, ostree falls back to a hardlink checkout and
+# EROFS leaves the boot path entirely.
+{ pkgs, lib, config, bootcPackage ? pkgs.bootc, composefs ? true }:
 
 let
   # The same composefs-enabled ostree bootc was linked against.
@@ -32,10 +39,10 @@ let
   # transient, so it has to exist in both places.
   prepareRootConf = pkgs.writeText "prepare-root.conf" ''
     [composefs]
-    enabled = yes
+    enabled = ${if composefs then "yes" else "no"}
 
     [sysroot]
-    readonly = true
+    readonly = ${if composefs then "true" else "false"}
   '';
 
   # Kernel arguments bootc bakes into the BLS entry it writes.

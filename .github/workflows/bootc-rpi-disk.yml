@@ -17,6 +17,9 @@ on:
       size:
         description: "Disk image size"
         default: "8G"
+      composefs:
+        description: "composefs deployment. Set to no to bisect the EROFS mount out of the boot path."
+        default: "yes"
 
 permissions:
   contents: read
@@ -50,8 +53,11 @@ jobs:
         run: |
           set -euxo pipefail
           # No secrets.env in CI; the flake falls back to placeholder values.
+          pkg=bootc-image
+          if [ "${{ inputs.composefs }}" = "no" ]; then pkg=bootc-image-plain; fi
+          echo "building $pkg"
           nix build --accept-flake-config -L \
-            ./nix#packages.aarch64-linux.bootc-image \
+            "./nix#packages.aarch64-linux.$pkg" \
             --out-link bootc-image
           ./bootc-image | sudo podman load
           sudo podman images
@@ -72,6 +78,7 @@ jobs:
             test -s "/usr/lib/modules/$kver/dtbs/overlays/overlay_map.dtb"
             test -s "/usr/lib/modules/$kver/dtbs/overlays/README"
             test -s /usr/lib/ostree/prepare-root.conf
+            cat /usr/lib/ostree/prepare-root.conf
             test -s /usr/lib/bootc/kargs.d/10-rpi.toml
             test -s /usr/lib/os-release
             test -L /var/run
