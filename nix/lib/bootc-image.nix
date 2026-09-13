@@ -138,6 +138,17 @@ let
     echo uninitialized > $out/etc/machine-id
     chmod 0644 $out/etc/machine-id
 
+    # podman resolves uid 0 to find HOME, and NixOS only materialises
+    # /etc/passwd at activation -- which is after install and after first boot.
+    # So ship the ones this system generates anyway. ostree merges /etc from
+    # here and activation rewrites them later.
+    #
+    # passwd and group only. /etc/shadow carries password hashes and this image
+    # is pushable to a registry, so it must never be baked into a layer; the
+    # users module writes it at activation from the deployed configuration.
+    install -Dm0644 -L ${config.system.build.etc}/etc/passwd $out/etc/passwd
+    install -Dm0644 -L ${config.system.build.etc}/etc/group  $out/etc/group
+
     install -Dm0644 ${baseDirsTmpfiles} \
       $out/usr/lib/tmpfiles.d/bootc-base-dirs.conf
 
@@ -197,6 +208,8 @@ pkgs.dockerTools.streamLayeredImage {
         pkgs.gnused
         pkgs.jq
       ]}:/usr/bin:/bin:/usr/sbin:/sbin"
+      # Without this podman falls back to a uid lookup to find HOME.
+      "HOME=/root"
     ];
     Cmd = [ "${bootcPackage}/bin/bootc" ];
   };
