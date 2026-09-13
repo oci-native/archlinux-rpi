@@ -42,9 +42,17 @@ jobs:
       - name: Verify the firmware partition is bootable
         run: |
           set -euxo pipefail
-          img=$(echo sd-image/sd-image/*.img)
-          cp "$img" nixos-rpi5.img
+          # nixos-raspberrypi's sdImage compresses its output, so the build
+          # product is a .img.zst rather than a raw .img.
+          img=$(find -L sd-image/sd-image -type f \( -name '*.img' -o -name '*.img.zst' \) | head -1)
+          test -n "$img"
+          echo "built image: $img"
+          case "$img" in
+            *.zst) zstd -dc "$img" > nixos-rpi5.img ;;
+            *)     cp "$img" nixos-rpi5.img ;;
+          esac
           chmod u+w nixos-rpi5.img
+          ls -l nixos-rpi5.img
           sudo sfdisk -d nixos-rpi5.img
           loop=$(sudo losetup --find --show --partscan --read-only nixos-rpi5.img)
           mkdir -p fw && sudo mount -o ro "${loop}p1" fw
