@@ -19,3 +19,11 @@ nix/out/
 result
 nix/out/
 nix/bootc-bin/
+
+# Upstream ALARM rootfs tarball, fetched by `make archlinuxarm-base`.
+# ~800MB — never commit, CI re-downloads it fresh.
+archlinuxarm-docker/*.tar.gz
+
+# Local working clone of AlmaLinux/bootc-images-rpi, not part of this repo.
+bootc-images-rpi/
+archlinux-rpi/

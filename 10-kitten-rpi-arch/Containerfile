@@ -1,0 +1,164 @@
+# Arch Linux ARM variant of the RPi bootc image.
+#
+# FIRST DRAFT — untested end to end. Arch has no equivalent of
+# bootc-base-imagectl (that tool shells out to dnf; Arch has no dnf), so this
+# stage does the RPM-manifest tool's job by hand with pacstrap, following the
+# pattern from https://github.com/frap129/arch-bootc (the only working
+# Arch+bootc reference found). Expect to iterate on this.
+#
+# Prereq: `make archlinuxarm-base` once, to produce localhost/archlinuxarm:latest.
+#
+# Known open questions, left as-is on purpose rather than guessed away:
+#   - linux-rpi is the aarch64 kernel for Pi 3/4/Zero2W. Pi5 needs
+#     linux-rpi-16k instead (16K page size) — untested here.
+#   - bootc has no prebuilt Arch/ALARM package (x86_64 or aarch64), only an
+#     AUR PKGBUILD, so this builds it from source under emulation — slow,
+#     and the AUR package is known to lag upstream. It also needs libselinux
+#     built and installed first (see below), which isn't declared as a
+#     dependency in bootc's own AUR PKGBUILD. bootupd is skipped
+#     entirely: its PKGBUILD wants grub+efibootmgr (x86_64 EFI tooling RPi
+#     has no use for), matching how AlmaLinux's Containerfile strips
+#     efibootmgr out of bootupd's manifest instead of relying on it. If
+#     `bootc` turns out to hard-require the bootupd binary at install/switch
+#     time, that'll surface as a clear missing-binary error then.
+#   - the pacman-db-relocate / ostree symlink dance below mirrors frap129's
+#     working image but has not been booted on real RPi hardware yet.
+
+FROM localhost/archlinuxarm:latest AS builder
+
+# pacman 7's Landlock-based download sandbox doesn't work under qemu-user
+# emulation (or most container runtimes) — "Landlock is not supported by the
+# kernel!" Disable it; signature checking is untouched, this only turns off
+# the extra confinement around the downloader.
+RUN sed -i '/^\[options\]/a DisableSandbox\nDisableDownloadTimeout\nParallelDownloads = 5' /etc/pacman.conf
+
+# Split from the package install below on purpose: GPG keyring generation
+# under qemu emulation is slow (low entropy in a fresh container), and it's
+# wasted work paying that cost again on every edit to the package list further
+# down. Keeping it its own layer means it only runs once and stays cached.
+RUN pacman-key --init && \
+    pacman-key --populate archlinuxarm
+
+RUN pacman -Sy --noconfirm arch-install-scripts base-devel git ostree dracut rust \
+      go-md2man bash gcc-libs glib2 glibc openssl zlib zstd \
+      pcre2 python-build python-pip python-setuptools ruby swig
+
+# makepkg refuses to run as root, and its dependency install (`makepkg -s`)
+# calls sudo internally — which fails under this storage driver ("effective
+# uid is not 0", a nosuid-mount symptom). So: no bootupd (its PKGBUILD wants
+# grub+efibootmgr, pure x86_64 EFI tooling RPi has no use for — same reason
+# AlmaLinux's Containerfile strips efibootmgr out of bootupd's manifest
+# instead of relying on it), and every real dependency is installed as root
+# up front so `-s` has nothing left to sudo for.
+RUN useradd -m builder
+USER builder
+WORKDIR /home/builder
+
+# bootc-lib links against libselinux (for its Fedora/RHEL-oriented relabeling
+# support) via the `selinux-sys` Rust crate, unconditionally — no Cargo
+# feature to turn it off. Arch ships no SELinux by default, so libsepol and
+# libselinux (both officially arch=aarch64 in their AUR PKGBUILDs, maintained
+# at https://github.com/archlinuxhardened/selinux) have to be built first and
+# installed system-wide before bootc will even compile. bootc's binary also
+# dynamically links libselinux.so at runtime, so both go into /mnt later too.
+#
+# --skippgpcheck: makepkg's PGP check uses the *building user's* own gpg
+# keyring, separate from pacman-key's — none of these upstream releases'
+# signing keys are in it, and there's no reliable keyserver reachable from
+# here to import them under emulation. sha256sum verification (which does
+# run) already checks the tarball against the PKGBUILD; that PKGBUILD is the
+# same trust boundary as the rest of this AUR-sourced chain.
+RUN git clone https://aur.archlinux.org/libsepol.git && \
+    cd libsepol && makepkg -s --noconfirm --skippgpcheck
+USER root
+RUN pacman -U --noconfirm /home/builder/libsepol/*.pkg.tar.xz
+USER builder
+RUN git clone https://aur.archlinux.org/libselinux.git && \
+    cd libselinux && makepkg -s --noconfirm --skippgpcheck
+USER root
+RUN pacman -U --noconfirm /home/builder/libselinux/*.pkg.tar.xz
+# selinux-sys's build.rs generates bindings from selinux.h via bindgen, which
+# needs libclang at build time — not pulled in by anything installed so far.
+RUN pacman -S --noconfirm clang
+USER builder
+
+RUN git clone https://aur.archlinux.org/bootc.git && \
+    cd bootc && makepkg -s --noconfirm --skippgpcheck --ignorearch
+USER root
+
+# pacstrap -N (rootless-style, no bind-mounted /dev etc.) wants subuid/subgid.
+RUN echo 'root:1000:5000' > /etc/subuid && \
+    echo 'root:1000:5000' > /etc/subgid
+
+RUN install -d /mnt/etc/dracut.conf.d && \
+    echo 'add_dracutmodules+=" ostree "' > /mnt/etc/dracut.conf.d/ostree.conf
+
+RUN pacstrap -c -N /mnt \
+    base \
+    linux-rpi \
+    raspberrypi-bootloader \
+    linux-firmware-raspberrypi \
+    firmware-raspberrypi \
+    ostree \
+    dracut \
+    openssh
+
+RUN pacman -U --noconfirm --root /mnt \
+    /home/builder/libsepol/*.pkg.tar.xz \
+    /home/builder/libselinux/*.pkg.tar.xz \
+    /home/builder/bootc/*.pkg.tar.xz
+
+# Same RPi hardware-enablement blob the AlmaLinux variants use, unmodified:
+# ostree-aware bootloader shim + non-free Broadcom wifi firmware. Distro
+# agnostic, just files dropped into the target rootfs.
+RUN \
+  mkdir -p /mnt/usr/bin && \
+  mkdir -p /mnt/usr/lib/systemd/system/ostree-finalize-staged.service.d && \
+  curl -o /mnt/usr/lib/systemd/system/ostree-finalize-staged.service.d/rpi-bootc-bootloader.conf https://raw.githubusercontent.com/kfox1111/rpi-bootc-bootloader/refs/tags/v0.0.8/system/ostree-finalize-staged.service.d/rpi-bootc-bootloader.conf && \
+  curl -o /mnt/usr/bin/rpi-bootc-bootloader https://raw.githubusercontent.com/kfox1111/rpi-bootc-bootloader/refs/tags/v0.0.8/rpi-bootc-bootloader && \
+  chmod +x /mnt/usr/bin/rpi-bootc-bootloader && \
+  cd /tmp && \
+  curl -L -o firmware.tar.gz https://github.com/RPi-Distro/firmware-nonfree/archive/223ccf3a3ddb11b3ea829749fbbba4d65b380897/firmware-nonfree-223ccf3a3ddb11b3ea829749fbbba4d65b380897.tar.gz && \
+  tar -zxvf firmware.tar.gz && \
+  ln -s cyfmac43455-sdio-standard.bin firmware-nonfree-223ccf3a3ddb11b3ea829749fbbba4d65b380897/debian/config/brcm80211/cypress/cyfmac43455-sdio.bin && \
+  rm -f /mnt/usr/lib/firmware/brcm/brcmfmac43430-sdio.raspberrypi,model-zero-2-w.txt* && \
+  install -c -m 644 firmware-nonfree-223ccf3a3ddb11b3ea829749fbbba4d65b380897/debian/config/brcm80211/brcm/brcmfmac43436s-sdio.bin /mnt/usr/lib/firmware/brcm/ && \
+  install -c -m 644 firmware-nonfree-223ccf3a3ddb11b3ea829749fbbba4d65b380897/debian/config/brcm80211/brcm/brcmfmac43430-sdio.raspberrypi,model-zero-2-w.bin /mnt/usr/lib/firmware/brcm/ && \
+  install -c -m 644 firmware-nonfree-223ccf3a3ddb11b3ea829749fbbba4d65b380897/debian/config/brcm80211/brcm/brcmfmac43430-sdio.raspberrypi,model-zero-2-w.txt /mnt/usr/lib/firmware/brcm/ && \
+  install -c -m 644 firmware-nonfree-223ccf3a3ddb11b3ea829749fbbba4d65b380897/debian/config/brcm80211/brcm/brcmfmac43430-sdio.raspberrypi,3-model-b.bin /mnt/usr/lib/firmware/brcm/ && \
+  install -c -m 644 firmware-nonfree-223ccf3a3ddb11b3ea829749fbbba4d65b380897/debian/config/brcm80211/brcm/brcmfmac43430-sdio.raspberrypi,3-model-b.clm_blob /mnt/usr/lib/firmware/brcm/ && \
+  install -c -m 644 firmware-nonfree-223ccf3a3ddb11b3ea829749fbbba4d65b380897/debian/config/brcm80211/brcm/brcmfmac43430-sdio.raspberrypi,3-model-b.txt /mnt/usr/lib/firmware/brcm/ && \
+  install -c -m 644 firmware-nonfree-223ccf3a3ddb11b3ea829749fbbba4d65b380897/debian/config/brcm80211/brcm/brcmfmac43455-sdio.raspberrypi,3-model-b-plus.bin /mnt/usr/lib/firmware/brcm/ && \
+  install -c -m 644 firmware-nonfree-223ccf3a3ddb11b3ea829749fbbba4d65b380897/debian/config/brcm80211/brcm/brcmfmac43455-sdio.raspberrypi,3-model-b-plus.clm_blob /mnt/usr/lib/firmware/brcm/ && \
+  install -c -m 644 firmware-nonfree-223ccf3a3ddb11b3ea829749fbbba4d65b380897/debian/config/brcm80211/brcm/brcmfmac43455-sdio.raspberrypi,3-model-b-plus.txt /mnt/usr/lib/firmware/brcm/
+
+# Turn the pacstrapped tree into an ostree-native layout (mirrors
+# frap129/arch-bootc, the one Arch+bootc image known to actually boot):
+# pacman's db moves under /usr since /var becomes a mutable bind at runtime,
+# and the classic FHS dirs that ostree manages become symlinks into /var.
+RUN sed -i \
+    -e 's|^#\(DBPath\s*=\s*\).*|\1/usr/lib/pacman|g' \
+    /mnt/etc/pacman.conf && \
+    mkdir -p /mnt/usr/lib && \
+    mv /mnt/var/lib/pacman /mnt/usr/lib/pacman && \
+    rm -f /mnt/var/cache/pacman/pkg/* && \
+    find /mnt/etc -type s -exec rm {} \; && \
+    mkdir -p /mnt/sysroot /mnt/efi && \
+    rm -rf /mnt/boot/* /mnt/var/log /mnt/home /mnt/root /mnt/usr/local /mnt/srv && \
+    ln -s sysroot/ostree /mnt/ostree && \
+    ln -s var/home /mnt/home && \
+    ln -s var/roothome /mnt/root && \
+    ln -s var/usrlocal /mnt/usr/local && \
+    ln -s var/srv /mnt/srv
+
+RUN chroot /mnt dracut --force --regenerate-all
+
+FROM scratch
+
+COPY --from=builder /mnt/ /
+
+LABEL containers.bootc 1
+LABEL ostree.bootable 1
+
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]

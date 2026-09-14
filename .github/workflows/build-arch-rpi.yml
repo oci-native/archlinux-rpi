@@ -1,0 +1,63 @@
+name: Build Arch RPi (ghcr.io)
+
+# Standalone workflow for the experimental Arch Linux ARM variant
+# (10-kitten-rpi-arch/), carried over from the AlmaLinux bootc-images-rpi
+# Makefile framework. Independent of the Nix/patched-bootc pipeline in the
+# other workflows here. Runs on a native arm64 runner so the bootc AUR build
+# compiles at real speed instead of under qemu-user emulation, which is what
+# made local builds take hours.
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: ["**"]
+    paths:
+      - "10-kitten-rpi-arch/**"
+      - "archlinuxarm-docker/**"
+      - "Makefile"
+      - ".github/workflows/build-arch-rpi.yml"
+
+env:
+  IMAGE_NAME: archlinux-bootc-rpi
+  VERSION_MAJOR: 10-kitten-rpi-arch
+  PLATFORM: linux/arm64
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build and push
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+          sudo docker image prune -af || true
+
+      - name: Confirm podman is present
+        run: sudo podman version
+
+      - name: Build ALARM base image
+        run: make archlinuxarm-base PLATFORM=$PLATFORM
+
+      - name: Build bootc image
+        run: make image PLATFORM=$PLATFORM IMAGE_NAME=$IMAGE_NAME VERSION_MAJOR=$VERSION_MAJOR
+
+      - name: Log in to ghcr.io
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | sudo podman login ghcr.io \
+            -u "${{ github.actor }}" --password-stdin
+
+      - name: Push to ghcr.io
+        run: |
+          DEST=ghcr.io/${{ github.repository_owner }}/$IMAGE_NAME
+          DEST=$(echo "$DEST" | tr '[:upper:]' '[:lower:]')
+          sudo podman tag localhost/$IMAGE_NAME:latest "$DEST:latest"
+          sudo podman tag localhost/$IMAGE_NAME:latest "$DEST:$(date -u +%Y%m%d)-${GITHUB_SHA::7}"
+          sudo podman push "$DEST:latest"
+          sudo podman push "$DEST:$(date -u +%Y%m%d)-${GITHUB_SHA::7}"
