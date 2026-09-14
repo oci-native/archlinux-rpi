@@ -86,16 +86,19 @@ RUN git clone https://aur.archlinux.org/bootc.git && \
     cd bootc && makepkg -s --noconfirm --skippgpcheck --ignorearch
 USER root
 
-# pacstrap -N (rootless-style, no bind-mounted /dev etc.) wants subuid/subgid.
-RUN echo 'root:1000:5000' > /etc/subuid && \
-    echo 'root:1000:5000' > /etc/subgid
-
 RUN install -d /mnt/etc/dracut.conf.d && \
     echo 'add_dracutmodules+=" ostree "' > /mnt/etc/dracut.conf.d/ostree.conf
 
+# Plain chroot-mode pacstrap: CI builds run under rootful podman with
+# --cap-add=all, so the /mnt/proc bind mounts work. The -N (unshare) variant
+# cannot mount proc inside the build container's user namespace — and worse,
+# pacstrap exits 0 on that failure, leaving an empty rootfs that only blows
+# up steps later. Hence the -Q guard: prove the target actually got
+# populated before anything builds on top of it.
+#
 # jq: rpi-bootc-bootloader's sync parses `bootc status --format json` with it,
 # both in CI (first sync at image-assembly time) and on the Pi at upgrade time.
-RUN pacstrap -c -N /mnt \
+RUN pacstrap -c /mnt \
     base \
     linux-rpi \
     raspberrypi-bootloader \
@@ -104,7 +107,8 @@ RUN pacstrap -c -N /mnt \
     ostree \
     dracut \
     jq \
-    openssh
+    openssh && \
+    pacman --root /mnt -Q glibc linux-rpi
 
 RUN pacman -U --noconfirm --root /mnt \
     /home/builder/libsepol/*.pkg.tar.xz \
