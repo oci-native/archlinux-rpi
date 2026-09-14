@@ -93,6 +93,8 @@ RUN echo 'root:1000:5000' > /etc/subuid && \
 RUN install -d /mnt/etc/dracut.conf.d && \
     echo 'add_dracutmodules+=" ostree "' > /mnt/etc/dracut.conf.d/ostree.conf
 
+# jq: rpi-bootc-bootloader's sync parses `bootc status --format json` with it,
+# both in CI (first sync at image-assembly time) and on the Pi at upgrade time.
 RUN pacstrap -c -N /mnt \
     base \
     linux-rpi \
@@ -101,6 +103,7 @@ RUN pacstrap -c -N /mnt \
     firmware-raspberrypi \
     ostree \
     dracut \
+    jq \
     openssh
 
 RUN pacman -U --noconfirm --root /mnt \
@@ -132,12 +135,33 @@ RUN \
   install -c -m 644 firmware-nonfree-223ccf3a3ddb11b3ea829749fbbba4d65b380897/debian/config/brcm80211/brcm/brcmfmac43455-sdio.raspberrypi,3-model-b-plus.clm_blob /mnt/usr/lib/firmware/brcm/ && \
   install -c -m 644 firmware-nonfree-223ccf3a3ddb11b3ea829749fbbba4d65b380897/debian/config/brcm80211/brcm/brcmfmac43455-sdio.raspberrypi,3-model-b-plus.txt /mnt/usr/lib/firmware/brcm/
 
+# Stage the boot artifacts under /usr before /boot is emptied below; ostree
+# systems don't boot from a package-manager-owned /boot. Three destinations:
+#  - /usr/lib/modules/<kver>/vmlinuz is where bootc install expects to find
+#    the kernel (linux-rpi only drops it in /boot as kernel8.img);
+#  - rpi-bootc-bootloader's sync copies each deployment's DTBs+overlays from
+#    /usr/share/raspberrypi2-kernel*/*/boot/ — an RPM-ism baked into its
+#    glob, so the Arch DTBs get parked at a path matching it;
+#  - /usr/lib/ostree-boot/* (the VideoCore GPU firmware: bootcode.bin,
+#    start*.elf, fixup*.dat) is copied onto the FAT partition's root at
+#    disk-assembly time, same as the AlmaLinux pipeline does.
+RUN set -eu; \
+    KVER=$(ls /mnt/usr/lib/modules); \
+    cp /mnt/boot/kernel8.img /mnt/usr/lib/modules/$KVER/vmlinuz; \
+    DTBDIR=/mnt/usr/share/raspberrypi2-kernel-arch/$KVER/boot; \
+    mkdir -p $DTBDIR/overlays; \
+    cp /mnt/boot/*.dtb $DTBDIR/; \
+    cp -r /mnt/boot/overlays/. $DTBDIR/overlays/; \
+    mkdir -p /mnt/usr/lib/ostree-boot; \
+    cp /mnt/boot/*.bin /mnt/boot/*.elf /mnt/boot/*.dat /mnt/usr/lib/ostree-boot/
+
 # Turn the pacstrapped tree into an ostree-native layout (mirrors
 # frap129/arch-bootc, the one Arch+bootc image known to actually boot):
 # pacman's db moves under /usr since /var becomes a mutable bind at runtime,
 # and the classic FHS dirs that ostree manages become symlinks into /var.
 RUN sed -i \
     -e 's|^#\(DBPath\s*=\s*\).*|\1/usr/lib/pacman|g' \
+    -e '/^\[options\]/a DisableSandbox' \
     /mnt/etc/pacman.conf && \
     mkdir -p /mnt/usr/lib && \
     mv /mnt/var/lib/pacman /mnt/usr/lib/pacman && \
@@ -151,7 +175,11 @@ RUN sed -i \
     ln -s var/usrlocal /mnt/usr/local && \
     ln -s var/srv /mnt/srv
 
-RUN chroot /mnt dracut --force --regenerate-all
+# The initramfs has to sit next to the kernel in the module dir for bootc
+# install to pick it up; --no-hostonly because dracut would otherwise tailor
+# it to the build container instead of a Raspberry Pi.
+RUN KVER=$(ls /mnt/usr/lib/modules) && \
+    chroot /mnt dracut --force --no-hostonly /usr/lib/modules/$KVER/initramfs.img $KVER
 
 FROM scratch
 

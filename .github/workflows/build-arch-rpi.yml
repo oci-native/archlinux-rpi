@@ -6,6 +6,14 @@ name: Build Arch RPi (ghcr.io)
 # other workflows here. Runs on a native arm64 runner so the bootc AUR build
 # compiles at real speed instead of under qemu-user emulation, which is what
 # made local builds take hours.
+#
+# Produces two things:
+#   - ghcr.io/<owner>/archlinux-bootc-rpi:{latest,bootstrap,<date>-<sha>}
+#   - a flashable raw SD-card image (xz) as a workflow artifact, assembled
+#     with `bootc install to-filesystem --bootloader none` plus
+#     rpi-bootc-bootloader sync — the same layout the AlmaLinux pipeline
+#     builds via bootc-image-builder, minus bib (whose install path needs
+#     bootupd, which does not exist for Arch; see frap129/arch-bootc).
 
 on:
   workflow_dispatch: {}
@@ -17,10 +25,15 @@ on:
       - "Makefile"
       - ".github/workflows/build-arch-rpi.yml"
 
+concurrency:
+  group: build-arch-rpi-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   IMAGE_NAME: archlinux-bootc-rpi
   VERSION_MAJOR: 10-kitten-rpi-arch
   PLATFORM: linux/arm64
+  DISK_SIZE: 8G
 
 permissions:
   contents: read
@@ -28,7 +41,7 @@ permissions:
 
 jobs:
   build:
-    name: Build and push
+    name: Build, push, make disk image
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
     steps:
@@ -39,14 +52,26 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
           sudo docker image prune -af || true
 
-      - name: Confirm podman is present
-        run: sudo podman version
+      - name: Install disk tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xfsprogs dosfstools parted
+          sudo podman version
 
       - name: Build ALARM base image
         run: make archlinuxarm-base PLATFORM=$PLATFORM
 
       - name: Build bootc image
         run: make image PLATFORM=$PLATFORM IMAGE_NAME=$IMAGE_NAME VERSION_MAJOR=$VERSION_MAJOR
+
+      - name: Build bootstrap image (cloud-init variant)
+        run: |
+          set -euxo pipefail
+          sudo podman build \
+            --build-arg=BASE=localhost/$IMAGE_NAME:latest \
+            -t localhost/$IMAGE_NAME:bootstrap \
+            -f $VERSION_MAJOR/bootstrap-image/Dockerfile \
+            $VERSION_MAJOR/bootstrap-image
 
       - name: Log in to ghcr.io
         run: |
@@ -55,9 +80,102 @@ jobs:
 
       - name: Push to ghcr.io
         run: |
+          set -euxo pipefail
           DEST=ghcr.io/${{ github.repository_owner }}/$IMAGE_NAME
           DEST=$(echo "$DEST" | tr '[:upper:]' '[:lower:]')
+          echo "DEST=$DEST" >> "$GITHUB_ENV"
           sudo podman tag localhost/$IMAGE_NAME:latest "$DEST:latest"
           sudo podman tag localhost/$IMAGE_NAME:latest "$DEST:$(date -u +%Y%m%d)-${GITHUB_SHA::7}"
+          sudo podman tag localhost/$IMAGE_NAME:bootstrap "$DEST:bootstrap"
           sudo podman push "$DEST:latest"
           sudo podman push "$DEST:$(date -u +%Y%m%d)-${GITHUB_SHA::7}"
+          sudo podman push "$DEST:bootstrap"
+
+      # The flashable image: partition, mkfs, bootc install, then populate
+      # the FAT partition the way the AlmaLinux shared-steps pipeline does.
+      - name: Partition and format the disk image
+        run: |
+          set -euxo pipefail
+          IMG=/tmp/disk.raw
+          truncate -s $DISK_SIZE $IMG
+          # Plain MBR, which the VideoCore firmware reads natively — no GPT,
+          # so none of the AlmaLinux pipeline's hybrid-MBR sgdisk surgery.
+          sudo parted -s $IMG \
+            mklabel msdos \
+            mkpart primary fat32 4MiB 1028MiB \
+            mkpart primary 1028MiB 2052MiB \
+            mkpart primary 2052MiB 100%
+          LOOP=$(sudo losetup -f --show -P $IMG)
+          echo "LOOP=$LOOP" >> "$GITHUB_ENV"
+          # CIDATA label doubles as cloud-init's NoCloud seed marker.
+          sudo mkfs.vfat -F 32 -n CIDATA ${LOOP}p1
+          sudo mkfs.xfs -f -L boot ${LOOP}p2
+          sudo mkfs.xfs -f -L root ${LOOP}p3
+
+      - name: bootc install to-filesystem
+        run: |
+          set -euxo pipefail
+          sudo mkdir -p /mnt/target
+          sudo mount ${LOOP}p3 /mnt/target
+          sudo mkdir -p /mnt/target/boot
+          sudo mount ${LOOP}p2 /mnt/target/boot
+          # --bootloader none: bootupd does not exist on Arch, and the RPi has
+          # no bootloader to install anyway — the VideoCore firmware boots
+          # os_prefix directories that rpi-bootc-bootloader maintains.
+          sudo podman run --rm --privileged --pid=host \
+            --security-opt label=type:unconfined_t \
+            -v /var/lib/containers:/var/lib/containers \
+            -v /mnt/target:/target \
+            -v /dev:/dev \
+            localhost/$IMAGE_NAME:bootstrap \
+            bootc install to-filesystem \
+              --bootloader none \
+              --generic-image \
+              --skip-fetch-check \
+              --target-imgref $DEST:bootstrap \
+              /target
+
+      - name: Populate the FAT partition
+        run: |
+          set -euxo pipefail
+          # GPU firmware + cloud-init seed onto the FAT root, from the host.
+          sudo mkdir -p /mnt/fat
+          sudo mount ${LOOP}p1 /mnt/fat
+          sudo cp -a --no-preserve=links /mnt/target/ostree/deploy/default/deploy/*/usr/lib/ostree-boot/. /mnt/fat/
+          sudo touch /mnt/fat/meta-data
+          sudo cp $VERSION_MAJOR/bootstrap-image/user-data /mnt/fat/
+          sudo cp $VERSION_MAJOR/bootstrap-image/README.txt /mnt/fat/
+          sudo umount /mnt/fat
+          sudo umount /mnt/target/boot /mnt/target
+          # First bootloader sync, run from inside the image so it uses the
+          # same rpi-bootc-bootloader/jq/bootc the Pi will use at upgrade
+          # time. It mounts the FAT partition itself (derived from /sysroot's
+          # device) and writes config.txt + bootc/entries/ostree-1/.
+          sudo podman run --rm --privileged \
+            -v /dev:/dev \
+            --entrypoint /bin/bash \
+            localhost/$IMAGE_NAME:bootstrap \
+            -c "mount ${LOOP}p3 /sysroot && mount ${LOOP}p2 /boot && \
+                (bootc status --format json | jq .) && \
+                grep options /boot/loader/entries/ostree-1.conf && \
+                rpi-bootc-bootloader version && \
+                bash -x rpi-bootc-bootloader sync && \
+                umount /sysroot /boot"
+          sudo losetup -d $LOOP
+
+      - name: Compress disk image
+        run: |
+          set -euxo pipefail
+          NAME=$IMAGE_NAME-$(date -u +%Y%m%d)-${GITHUB_SHA::7}.raw
+          sudo mv /tmp/disk.raw /tmp/$NAME
+          sudo xz -T0 -3 /tmp/$NAME
+          ls -lh /tmp/$NAME.xz
+          echo "DISK_XZ=/tmp/$NAME.xz" >> "$GITHUB_ENV"
+
+      - name: Upload disk image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.IMAGE_NAME }}-sdcard-image
+          path: ${{ env.DISK_XZ }}
+          retention-days: 14
+          if-no-files-found: error
