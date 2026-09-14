@@ -119,6 +119,7 @@ RUN pacman -U --noconfirm --root /mnt \
 # agnostic, just files dropped into the target rootfs.
 RUN \
   mkdir -p /mnt/usr/bin && \
+  mkdir -p /mnt/usr/lib/firmware/brcm && \
   mkdir -p /mnt/usr/lib/systemd/system/ostree-finalize-staged.service.d && \
   curl -o /mnt/usr/lib/systemd/system/ostree-finalize-staged.service.d/rpi-bootc-bootloader.conf https://raw.githubusercontent.com/kfox1111/rpi-bootc-bootloader/refs/tags/v0.0.8/system/ostree-finalize-staged.service.d/rpi-bootc-bootloader.conf && \
   curl -o /mnt/usr/bin/rpi-bootc-bootloader https://raw.githubusercontent.com/kfox1111/rpi-bootc-bootloader/refs/tags/v0.0.8/rpi-bootc-bootloader && \
