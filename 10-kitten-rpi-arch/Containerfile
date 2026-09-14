@@ -87,7 +87,38 @@ RUN git clone https://aur.archlinux.org/bootc.git && \
 USER root
 
 RUN install -d /mnt/etc/dracut.conf.d && \
-    echo 'add_dracutmodules+=" ostree "' > /mnt/etc/dracut.conf.d/ostree.conf
+    echo 'add_dracutmodules+=" ostree systemd "' > /mnt/etc/dracut.conf.d/ostree.conf
+
+# bootc install refuses to run without ostree/prepare-root.conf in the image.
+# composefs stays off for now: it needs EROFS in the kernel, and whether the
+# RPi foundation kernel config carries it is unverified — a plain ostree
+# hardlink deployment boots everywhere. Flip to 'maybe' once a composefs
+# boot has been proven on hardware.
+RUN mkdir -p /mnt/usr/lib/ostree && \
+    printf '[sysroot]\nreadonly = true\n\n[composefs]\nenabled = false\n' \
+      > /mnt/usr/lib/ostree/prepare-root.conf
+
+# On an ostree system /var starts empty on every boot layer; these tmpfiles
+# entries recreate the directories the /home, /root, /usr/local and /srv
+# symlinks point into (same set frap129/arch-bootc ships). Without them the
+# symlinks dangle and everything from user creation to journald breaks.
+RUN mkdir -p /mnt/usr/lib/tmpfiles.d && \
+    printf '%s\n' \
+      'd /var/log/journal 0755 root root -' \
+      'd /var/home 0755 root root -' \
+      'd /var/srv 0755 root root -' \
+      'd /var/roothome 0700 root root -' \
+      'd /var/usrlocal 0755 root root -' \
+      'd /var/usrlocal/bin 0755 root root -' \
+      'd /var/usrlocal/etc 0755 root root -' \
+      'd /var/usrlocal/include 0755 root root -' \
+      'd /var/usrlocal/lib 0755 root root -' \
+      'd /var/usrlocal/sbin 0755 root root -' \
+      'd /var/usrlocal/share 0755 root root -' \
+      'd /var/usrlocal/src 0755 root root -' \
+      'd /var/mnt 0755 root root -' \
+      'd /run/media 0755 root root -' \
+      > /mnt/usr/lib/tmpfiles.d/ostree-integration.conf
 
 # Plain chroot-mode pacstrap: CI builds run under rootful podman with
 # --cap-add=all, so the /mnt/proc bind mounts work. The -N (unshare) variant
