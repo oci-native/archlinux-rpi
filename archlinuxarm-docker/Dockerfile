@@ -1,4 +1,6 @@
-FROM --platform=linux/amd64 alpine:3.16 AS verify
+# No platform pin: this stage only untars the rootfs, so it runs on the
+# build host's native arch (amd64 laptop, arm64 CI runner) without emulation.
+FROM alpine:3.16 AS verify
 RUN apk add --no-cache libarchive-tools
 
 COPY ArchLinuxARM-aarch64-latest.tar.gz /tmp
