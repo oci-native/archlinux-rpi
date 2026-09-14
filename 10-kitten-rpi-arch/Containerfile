@@ -137,6 +137,8 @@ RUN pacstrap -c /mnt \
     ostree \
     dracut \
     jq \
+    podman \
+    skopeo \
     openssh && \
     pacman --root /mnt -Q glibc linux-rpi
 
