@@ -27,3 +27,4 @@ archlinuxarm-docker/*.tar.gz
 # Local working clone of AlmaLinux/bootc-images-rpi, not part of this repo.
 bootc-images-rpi/
 archlinux-rpi/
+sdcard-image/
