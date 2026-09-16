@@ -154,6 +154,7 @@ RUN pacstrap -c /mnt \
     git \
     gcc \
     make \
+    libxcrypt-compat \
     openssh && \
     pacman --root /mnt -Q glibc linux-rpi && \
     systemctl --root=/mnt enable NetworkManager NetworkManager-wait-online sshd
