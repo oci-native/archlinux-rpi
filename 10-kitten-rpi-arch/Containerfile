@@ -136,6 +136,8 @@ RUN mkdir -p /mnt/usr/lib/tmpfiles.d && \
 # xfsprogs: cloud-init's growpart grew the root partition on first boot but
 # xfs_growfs /var failed for want of the binary, leaving the filesystem at
 # its shipped size. wireless-regdb: cfg80211 wants regulatory.db at boot.
+# git/gcc/make: Homebrew's Linux requirements (its first-boot installer
+# runs on the device, where nothing can be compiled without them).
 RUN pacstrap -c /mnt \
     base \
     linux-rpi \
@@ -149,9 +151,23 @@ RUN pacstrap -c /mnt \
     jq \
     podman \
     skopeo \
+    git \
+    gcc \
+    make \
     openssh && \
     pacman --root /mnt -Q glibc linux-rpi && \
-    systemctl --root=/mnt enable NetworkManager sshd
+    systemctl --root=/mnt enable NetworkManager NetworkManager-wait-online sshd
+
+# Nix (plain Nix, not NixOS): the store lives in /var/nix (mutable, survives
+# bootc upgrades) bind-mounted onto /nix; the actual install happens once on
+# first boot since ostree images cannot ship /var content. See the unit files
+# for the details.
+COPY 10-kitten-rpi-arch/files/nix-store-bind.service \
+     10-kitten-rpi-arch/files/nix-install.service \
+     /mnt/usr/lib/systemd/system/
+RUN mkdir -p /mnt/nix && \
+    printf 'd /var/nix 0755 root root -\n' > /mnt/usr/lib/tmpfiles.d/nix.conf && \
+    systemctl --root=/mnt enable nix-store-bind.service nix-install.service
 
 RUN pacman -U --noconfirm --root /mnt \
     /home/builder/libsepol/*.pkg.tar.xz \
@@ -222,6 +238,13 @@ RUN sed -i \
     ln -s var/roothome /mnt/root && \
     ln -s var/usrlocal /mnt/usr/local && \
     ln -s var/srv /mnt/srv
+
+# Locales must be generated at build time: /usr is read-only at runtime on
+# ostree, so locale-gen on the device can never write locale-archive (every
+# shell prints "Cannot set LC_CTYPE" without this).
+RUN sed -i 's/^#en_US.UTF-8/en_US.UTF-8/' /mnt/etc/locale.gen && \
+    chroot /mnt locale-gen && \
+    echo 'LANG=en_US.UTF-8' > /mnt/etc/locale.conf
 
 # The initramfs has to sit next to the kernel in the module dir for bootc
 # install to pick it up; --no-hostonly because dracut would otherwise tailor

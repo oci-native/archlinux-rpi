@@ -1,0 +1,20 @@
+# First-boot Homebrew install. Lives in the bootstrap (cloud-init) image
+# because the installer refuses to run as root and needs the alarm user,
+# which cloud-init creates on first boot. Installs to
+# /home/linuxbrew/.linuxbrew (backed by /var/home, so it survives bootc
+# upgrades). Caveat: Homebrew on arm64 Linux is beta; some formulae build
+# from source or lack bottles.
+[Unit]
+Description=Install Homebrew on first boot
+Wants=network-online.target
+After=network-online.target cloud-final.service
+ConditionPathExists=!/home/linuxbrew/.linuxbrew/bin/brew
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=60min
+ExecStart=/usr/bin/bash -c 'sudo -iu alarm NONINTERACTIVE=1 bash -c "$(curl --retry 5 -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+
+[Install]
+WantedBy=multi-user.target

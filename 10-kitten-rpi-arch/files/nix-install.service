@@ -1,0 +1,20 @@
+# First-boot Nix install (Determinate installer, multi-user with nix-daemon).
+# The store cannot ship inside the image: ostree treats /var as machine-local
+# state, so it has to be populated on the device. The installer writes its
+# receipt at /nix/receipt.json; its presence makes this a no-op forever after,
+# including across bootc upgrades (the store survives in /var/nix).
+[Unit]
+Description=Install Nix into /var/nix on first boot
+Wants=network-online.target
+After=network-online.target nix-store-bind.service
+Requires=nix-store-bind.service
+ConditionPathExists=!/nix/receipt.json
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=30min
+ExecStart=/usr/bin/bash -c 'curl --retry 5 -fsSL https://install.determinate.systems/nix | bash -s -- install linux --no-confirm'
+
+[Install]
+WantedBy=multi-user.target

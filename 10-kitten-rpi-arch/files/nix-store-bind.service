@@ -1,0 +1,21 @@
+# /nix on an ostree system: the root is read-only and /var is the machine's
+# mutable state, so the store physically lives in /var/nix and gets bind
+# mounted onto /nix (store paths hard-require the /nix prefix; a symlink
+# breaks sandboxed builds). A service rather than a nix.mount unit because
+# /var/nix has to be created first and mount units have no ExecStartPre.
+[Unit]
+Description=Bind mount /var/nix onto /nix
+DefaultDependencies=no
+ConditionPathIsMountPoint=!/nix
+RequiresMountsFor=/var
+After=systemd-remount-fs.service
+Before=local-fs.target nix-install.service nix-daemon.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/usr/bin/mkdir -p /var/nix
+ExecStart=/usr/bin/mount --bind /var/nix /nix
+
+[Install]
+WantedBy=local-fs.target
