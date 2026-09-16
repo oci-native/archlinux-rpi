@@ -1,20 +1,28 @@
-# First-boot Nix install (Determinate installer, multi-user with nix-daemon).
-# The store cannot ship inside the image: ostree treats /var as machine-local
-# state, so it has to be populated on the device. The installer writes its
-# receipt at /nix/receipt.json; its presence makes this a no-op forever after,
+# First-boot Nix install (official nixos.org installer, multi-user daemon
+# mode). The store cannot ship inside the image: ostree treats /var as
+# machine-local state, so it has to be populated on the device, onto the
+# /var/nix bind mount that nix-store-bind.service prepares.
+#
+# The Determinate installer is deliberately NOT used: as of 3.22.x its
+# determinate-nixd provisioning tries to create /usr/local/bin and dies on
+# this image's /usr/local symlink (ostree points it at /var/usrlocal), in
+# both wrapper and vanilla modes. The upstream installer never touches
+# /usr/local and completed cleanly as root on a real Pi 5.
+#
+# The condition makes this a no-op forever after the first success,
 # including across bootc upgrades (the store survives in /var/nix).
 [Unit]
 Description=Install Nix into /var/nix on first boot
 Wants=network-online.target
 After=network-online.target nix-store-bind.service
 Requires=nix-store-bind.service
-ConditionPathExists=!/nix/receipt.json
+ConditionPathExists=!/nix/var/nix/profiles/default
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 TimeoutStartSec=30min
-ExecStart=/usr/bin/bash -c 'curl --retry 5 -fsSL https://install.determinate.systems/nix | bash -s -- install linux --no-confirm'
+ExecStart=/usr/bin/bash -c 'curl --retry 5 -fsSL https://nixos.org/nix/install | bash -s -- --daemon --yes'
 
 [Install]
 WantedBy=multi-user.target
