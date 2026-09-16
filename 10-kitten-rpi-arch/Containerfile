@@ -129,18 +129,29 @@ RUN mkdir -p /mnt/usr/lib/tmpfiles.d && \
 #
 # jq: rpi-bootc-bootloader's sync parses `bootc status --format json` with it,
 # both in CI (first sync at image-assembly time) and on the Pi at upgrade time.
+#
+# networkmanager: first hardware boot came up clean but invisible — the kernel
+# brought up end0 and nothing existed to DHCP it (the AlmaLinux images ship
+# NetworkManager; this list originally didn't). Also covers wifi via nmcli.
+# xfsprogs: cloud-init's growpart grew the root partition on first boot but
+# xfs_growfs /var failed for want of the binary, leaving the filesystem at
+# its shipped size. wireless-regdb: cfg80211 wants regulatory.db at boot.
 RUN pacstrap -c /mnt \
     base \
     linux-rpi \
     raspberrypi-bootloader \
     firmware-raspberrypi \
+    networkmanager \
+    wireless-regdb \
+    xfsprogs \
     ostree \
     dracut \
     jq \
     podman \
     skopeo \
     openssh && \
-    pacman --root /mnt -Q glibc linux-rpi
+    pacman --root /mnt -Q glibc linux-rpi && \
+    systemctl --root=/mnt enable NetworkManager sshd
 
 RUN pacman -U --noconfirm --root /mnt \
     /home/builder/libsepol/*.pkg.tar.xz \
