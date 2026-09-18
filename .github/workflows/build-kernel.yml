@@ -85,7 +85,7 @@ jobs:
           set -euxo pipefail
           mkdir -p out
           sudo podman run --rm --platform=$PLATFORM \
-            -e KERNEL_COMMIT -e KERNEL_VER -e KERNEL_PKGREL=$PKGREL \
+            -e KERNEL_COMMIT="$KERNEL_COMMIT" -e KERNEL_VER="$KERNEL_VER" -e KERNEL_PKGREL="$PKGREL" \
             -v "$PWD/10-kitten-rpi-arch/kernel:/src:ro" \
             -v "$PWD/out:/out" \
             localhost/archlinuxarm:latest \
