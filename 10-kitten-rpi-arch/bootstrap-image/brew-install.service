@@ -2,7 +2,10 @@
 # because the installer refuses to run as root and needs the alarm user,
 # which cloud-init creates on first boot. Installs to
 # /home/linuxbrew/.linuxbrew (backed by /var/home, so it survives bootc
-# upgrades). Caveat: Homebrew on arm64 Linux is beta; some formulae build
+# upgrades). Hooked into cloud-init.target, not multi-user.target: cloud-final
+# orders itself after multi-user, so wanting this from multi-user while
+# ordering after cloud-final is a cycle systemd breaks by dropping the job.
+# Caveat: Homebrew on arm64 Linux is beta; some formulae build
 # from source or lack bottles.
 [Unit]
 Description=Install Homebrew on first boot
@@ -14,7 +17,11 @@ ConditionPathExists=!/home/linuxbrew/.linuxbrew/bin/brew
 Type=oneshot
 RemainAfterExit=yes
 TimeoutStartSec=60min
-ExecStart=/usr/bin/bash -c 'sudo -iu alarm NONINTERACTIVE=1 bash -c "$(curl --retry 5 -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+# The script is saved to a file first: handing it to sudo -i as one
+# argument re-quotes the whole thing for the login shell, and under systemd
+# (no tty, empty stdin) that produced a silent exit 0 with nothing installed.
+ExecStart=/usr/bin/curl --retry 5 -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh -o /run/brew-install.sh
+ExecStart=/usr/bin/sudo -u alarm -H /usr/bin/env NONINTERACTIVE=1 /usr/bin/bash /run/brew-install.sh
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=cloud-init.target

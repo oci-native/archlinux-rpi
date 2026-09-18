@@ -157,7 +157,7 @@ RUN pacstrap -c /mnt \
     libxcrypt-compat \
     openssh && \
     pacman --root /mnt -Q glibc linux-rpi && \
-    systemctl --root=/mnt enable NetworkManager NetworkManager-wait-online sshd
+    systemctl --root=/mnt enable NetworkManager NetworkManager-wait-online sshd systemd-timesyncd
 
 # Nix (plain Nix, not NixOS): the store lives in /var/nix (mutable, survives
 # bootc upgrades) bind-mounted onto /nix; the actual install happens once on

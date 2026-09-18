@@ -22,6 +22,7 @@ ConditionPathExists=!/nix/var/nix/profiles/default
 Type=oneshot
 RemainAfterExit=yes
 TimeoutStartSec=30min
+Environment=HOME=/root
 ExecStart=/usr/bin/bash -c 'curl --retry 5 -fsSL https://nixos.org/nix/install | bash -s -- --daemon --yes'
 ExecStart=/usr/bin/bash -c 'grep -q experimental-features /etc/nix/nix.conf 2>/dev/null || { echo "experimental-features = nix-command flakes" >> /etc/nix/nix.conf && systemctl restart nix-daemon; }'
 
