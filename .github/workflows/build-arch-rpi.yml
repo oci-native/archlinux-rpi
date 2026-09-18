@@ -16,7 +16,12 @@ name: Build Arch RPi (ghcr.io)
 #     bootupd, which does not exist for Arch; see frap129/arch-bootc).
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      kernel_tag:
+        description: kernel-* release to install (empty = newest, "none" = ALARM's kernel)
+        default: ""
+        required: false
   push:
     branches: ["**"]
     paths:
@@ -57,6 +62,29 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends xfsprogs dosfstools parted
           sudo podman version
+
+      # Newest kernel-* release (from build-kernel.yml) goes into the build
+      # context; the Containerfile installs it over ALARM's linux-rpi.
+      - name: Fetch kernel package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KERNEL_TAG: ${{ github.event.inputs.kernel_tag }}
+        run: |
+          set -euxo pipefail
+          if [ "$KERNEL_TAG" = none ]; then
+            echo "building with ALARM's linux-rpi" | tee -a "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
+          if [ -z "$KERNEL_TAG" ]; then
+            KERNEL_TAG=$(gh release list --limit 50 --json tagName \
+              -q '[.[] | select(.tagName | startswith("kernel-"))][0].tagName // empty')
+          fi
+          if [ -z "$KERNEL_TAG" ]; then
+            echo "no kernel-* release yet; building with ALARM's linux-rpi" | tee -a "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
+          gh release download "$KERNEL_TAG" --pattern 'linux-rpi-[0-9]*.pkg.tar.*' \
+            --dir $VERSION_MAJOR/kernel-pkg/
+          ls -l $VERSION_MAJOR/kernel-pkg/
+          echo "kernel: $KERNEL_TAG" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Build ALARM base image
         run: make archlinuxarm-base PLATFORM=$PLATFORM

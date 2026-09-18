@@ -1,0 +1,110 @@
+name: Build RPi kernel package
+
+# Builds linux-rpi from a raspberrypi/linux branch tip using Arch Linux ARM's
+# own PKGBUILD (vendored in 10-kitten-rpi-arch/kernel/), so the image can
+# run a newer kernel than ALARM ships. ALARM tracks the Pi Foundation's LTS
+# branch (rpi-6.18.y at the time of writing); this defaults to rpi-7.2.y.
+#
+# The result is published as a GitHub release tagged kernel-<ver>-<rel>, and
+# build-arch-rpi.yml installs the newest such release over ALARM's linux-rpi
+# at pacstrap time. Building the kernel on every image build would double
+# the CI time, hence the split: this runs on demand or when the vendored
+# PKGBUILD changes, and finishes by kicking the image workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: raspberrypi/linux branch to build
+        default: rpi-7.2.y
+        required: true
+      pkgrel:
+        description: pkgrel for the package
+        default: "1"
+        required: true
+  push:
+    branches: ["**"]
+    paths:
+      - "10-kitten-rpi-arch/kernel/**"
+      - ".github/workflows/build-kernel.yml"
+
+concurrency:
+  group: build-kernel-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BRANCH: ${{ github.event.inputs.branch || 'rpi-7.2.y' }}
+  PKGREL: ${{ github.event.inputs.pkgrel || '1' }}
+  PLATFORM: linux/arm64
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  build:
+    name: makepkg linux-rpi
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+          sudo docker image prune -af || true
+
+      - name: Resolve branch tip and version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          COMMIT=$(gh api repos/raspberrypi/linux/commits/$BRANCH -q .sha)
+          VER=$(curl -fsSL https://raw.githubusercontent.com/raspberrypi/linux/$COMMIT/Makefile \
+                | sed -n '2,4p' | awk -F' = ' '{print $2}' | paste -sd.)
+          echo "KERNEL_COMMIT=$COMMIT" >> "$GITHUB_ENV"
+          echo "KERNEL_VER=$VER" >> "$GITHUB_ENV"
+          echo "KERNEL_TAG=kernel-$VER-$PKGREL" >> "$GITHUB_ENV"
+
+      - name: Skip if this kernel is already released
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$KERNEL_TAG" >/dev/null 2>&1; then
+            echo "release $KERNEL_TAG exists; bump pkgrel to rebuild" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "SKIP=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build ALARM base image
+        if: env.SKIP != '1'
+        run: make archlinuxarm-base PLATFORM=$PLATFORM
+
+      - name: makepkg
+        if: env.SKIP != '1'
+        run: |
+          set -euxo pipefail
+          mkdir -p out
+          sudo podman run --rm --platform=$PLATFORM \
+            -e KERNEL_COMMIT -e KERNEL_VER -e KERNEL_PKGREL=$PKGREL \
+            -v "$PWD/10-kitten-rpi-arch/kernel:/src:ro" \
+            -v "$PWD/out:/out" \
+            localhost/archlinuxarm:latest \
+            bash /src/build.sh
+          ls -lh out/
+
+      - name: Publish release
+        if: env.SKIP != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          gh release create "$KERNEL_TAG" out/*.pkg.tar.* \
+            --title "linux-rpi $KERNEL_VER-$PKGREL" \
+            --notes "linux-rpi built from raspberrypi/linux $BRANCH @ $KERNEL_COMMIT with ALARM's PKGBUILD."
+          echo "released $KERNEL_TAG" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Rebuild the image with this kernel
+        if: env.SKIP != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run build-arch-rpi.yml --ref "$GITHUB_REF_NAME" -f kernel_tag="$KERNEL_TAG"

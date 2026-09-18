@@ -1,0 +1,2 @@
+Kernel package drop zone. CI downloads the latest kernel-* release here
+before building the image; the Containerfile installs whatever it finds.

@@ -9,8 +9,9 @@
 # Prereq: `make archlinuxarm-base` once, to produce localhost/archlinuxarm:latest.
 #
 # Known open questions, left as-is on purpose rather than guessed away:
-#   - linux-rpi is the aarch64 kernel for Pi 3/4/Zero2W. Pi5 needs
-#     linux-rpi-16k instead (16K page size) — untested here.
+#   - linux-rpi (4K pages) drives the Pi 5 fine, verified on hardware; the
+#     16K variant is not needed. CI normally replaces ALARM's build of it
+#     with a newer kernel from the kernel-* releases (see kernel-pkg/ below).
 #   - bootc has no prebuilt Arch/ALARM package (x86_64 or aarch64), only an
 #     AUR PKGBUILD, so this builds it from source under emulation — slow,
 #     and the AUR package is known to lag upstream. It also needs libselinux
@@ -158,6 +159,22 @@ RUN pacstrap -c /mnt \
     openssh && \
     pacman --root /mnt -Q glibc linux-rpi && \
     systemctl --root=/mnt enable NetworkManager NetworkManager-wait-online sshd systemd-timesyncd
+
+# Newer kernel than ALARM ships, if CI dropped one in kernel-pkg/ (built by
+# build-kernel.yml from ALARM's PKGBUILD against a newer raspberrypi/linux
+# branch and fetched from the kernel-* GitHub releases). Same package name,
+# so pacman -U swaps it in over the pacstrapped one and the staging steps
+# below see a single module dir as before. With the directory empty this is
+# a no-op and the image keeps ALARM's kernel.
+COPY 10-kitten-rpi-arch/kernel-pkg/ /tmp/kernel-pkg/
+RUN set -eu; \
+    if ls /tmp/kernel-pkg/linux-rpi-[0-9]*.pkg.tar.* >/dev/null 2>&1; then \
+      pacman -U --noconfirm --root /mnt /tmp/kernel-pkg/linux-rpi-[0-9]*.pkg.tar.*; \
+    else \
+      echo "kernel-pkg/ empty: keeping ALARM's linux-rpi"; \
+    fi; \
+    pacman --root /mnt -Q linux-rpi; \
+    test "$(ls /mnt/usr/lib/modules | wc -l)" = 1
 
 # Nix (plain Nix, not NixOS): the store lives in /var/nix (mutable, survives
 # bootc upgrades) bind-mounted onto /nix; the actual install happens once on
