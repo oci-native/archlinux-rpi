@@ -280,7 +280,36 @@ does not exist on Arch. The install step is
 `bootc install to-filesystem --bootloader none` against the pre-made
 filesystems.
 
-The kernel is `linux-rpi` (4K pages).
+The kernel is `linux-rpi` (4K pages), but not the build Arch Linux ARM
+ships. ALARM follows the Pi Foundation's LTS branch; this repo builds the
+same PKGBUILD against a newer `raspberrypi/linux` branch.
+
+## Kernel
+
+`.github/workflows/build-kernel.yml` takes a branch name (default
+`rpi-7.2.y`), looks up its tip, runs ALARM's `linux-rpi` PKGBUILD against it
+on the arm64 runner, and publishes the package as a GitHub release tagged
+`kernel-<version>-<pkgrel>`. It then dispatches the image build, which
+downloads the newest `kernel-*` release into `10-kitten-rpi-arch/kernel-pkg/`
+and installs it over the pacstrapped kernel. The compile takes about 25
+minutes; the image build runs on every push and does not repeat it.
+
+The PKGBUILD and its support files under `10-kitten-rpi-arch/kernel/` are
+ALARM's, copied as they are. Only `_commit`, `pkgver` and `pkgrel` are
+rewritten at build time. To pick a different branch or force a rebuild:
+
+```sh
+gh workflow run build-kernel.yml -f branch=rpi-6.18.y -f pkgrel=2
+```
+
+To build an image with ALARM's own kernel instead:
+
+```sh
+gh workflow run build-arch-rpi.yml -f kernel_tag=none
+```
+
+Check what a running Pi has with `uname -r`; the pkgrel shows up as the
+`-1-rpi` suffix.
 
 ## Known quirks
 
