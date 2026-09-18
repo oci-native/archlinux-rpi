@@ -260,6 +260,10 @@ sudo bootc upgrade
 sudo reboot
 ```
 
+Reboot with the command, not by pulling the plug. ostree finalizes the
+staged deployment during a clean shutdown; a power cut discards it and the
+Pi comes back on the old deployment as if nothing happened.
+
 The upgrade pulls the `:bootstrap` tag from ghcr. The package is public, so
 anonymous pulls work. Every push to main that touches the image paths rebuilds
 and pushes; the Pi picks it up on the next upgrade, and the reboot switches
